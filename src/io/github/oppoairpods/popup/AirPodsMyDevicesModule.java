@@ -328,7 +328,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                             int radius = Math.max(2, Math.round(
                                     bar.getResources().getDisplayMetrics().density * 2.0f));
                             bar.setTickMark(new SliderTickDrawable(bar, radius));
-                            bar.setKeyProgressIncrement(20);
+                            bar.setKeyProgressIncrement(25);
                             bar.setSplitTrack(false);
                             Logx.i("adaptive slider tick marks installed");
                         }

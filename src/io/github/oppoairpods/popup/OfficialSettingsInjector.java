@@ -211,7 +211,7 @@ final class OfficialSettingsInjector {
                     new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
             set(preference, "setKey", "oppo_airpods_" + key);
             set(preference, "setTitle", title);
-            set(preference, "setSummary", summary);
+            if (!summary.isEmpty()) set(preference, "setSummary", summary);
             set(preference, "setPersistent", false);
             invoke(preference, "V0", new Class<?>[]{int.class}, new Object[]{max});
             try {
@@ -225,7 +225,7 @@ final class OfficialSettingsInjector {
                 if (!(value instanceof Number)) return false;
                 int progress = ((Number) value).intValue();
                 setter.accept(progress);
-                set(preference, "setSummary", summary + " · " + progress);
+                if (!summary.isEmpty()) set(preference, "setSummary", summary + " · " + progress);
                 return true;
             });
             add(group, preference);
@@ -247,7 +247,7 @@ final class OfficialSettingsInjector {
             invoke(category, "I0", new Class<?>[]{int.class}, new Object[]{-1000});
             add(screen, category);
             Object slider = addSlider(category, "adaptive_strength_slider", "自适应降噪强度",
-                    "拖动调节自适应降噪幅度", 100, getter, setter);
+                    "", 100, getter, setter);
             refreshers.add(() -> {
                 try {
                     boolean adaptive = controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1) == 4;
