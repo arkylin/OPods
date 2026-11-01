@@ -1,6 +1,6 @@
-# OPPO AirPods Enhanced
+# OPods
 
-面向 OPPO / ColorOS 的 AirPods 原生体验增强模块。它通过 LSPosed 把能力注入
+面向 OPPO / ColorOS 的 AirPods 原生体验增强模块（OPPO AirPods Enhanced）。它通过 LSPosed 把能力注入
 ColorOS 自带的 MyDevices 与 Bluetooth 进程，复用官方 AirPods 弹窗和设置页，
 不提供第二套桌面 App、常驻后台进程或独立耳机管理界面。
 
@@ -83,6 +83,33 @@ LSPosed 配置。覆盖安装后如果模块未重新生效，先停用再启用
 如果默认签名文件不存在，脚本会生成一个本地调试签名。要覆盖当前手机上的模块，后续 APK
 必须继续使用与已安装版本相同的签名；原始调试 keystore 不应提交到 Git，可以放在被忽略的
 `.keystore/` 目录中或通过 `-Keystore` 指定。
+
+## GitHub Actions
+
+`.github/workflows/build-apk.yml` 会在手动触发、推送 `main`、提交 Pull Request 和推送
+`v*` 标签时构建 APK。工作流读取 `AndroidManifest.xml` 的版本号，产物命名为：
+
+```text
+OPods-v3.4-arm64-v8a.apk
+OPods-v3.4-arm64-v8a.sha256
+```
+
+这个 APK 没有 native 库，是兼容 arm64-v8a 设备的通用包，不是按 ABI 拆分过的原生包。
+推送 `v*` 标签时会创建 GitHub Release，但发布前必须配置以下仓库 Secrets，确保签名与
+日常安装包一致：
+
+- `ANDROID_KEYSTORE_BASE64`：keystore 文件的 Base64 内容
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+没有 Secrets 时，普通 CI 构建会生成一次性调试签名，只适合检查构建和下载试用，不能覆盖
+用本地固定签名安装的旧版本。创建标签示例：
+
+```powershell
+git tag v3.4-arm64-v8a
+git push origin v3.4-arm64-v8a
+```
 
 ## 诊断
 

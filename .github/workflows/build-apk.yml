@@ -1,0 +1,124 @@
+name: Build OPods APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANDROID_PLATFORM: '37.2'
+  ANDROID_BUILD_TOOLS: '36.1.0'
+  ABI_LABEL: 'arm64-v8a'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install 'platforms;android-'${ANDROID_PLATFORM} 'build-tools;'${ANDROID_BUILD_TOOLS}
+
+      - name: Read version from manifest
+        shell: pwsh
+        run: |
+          [xml]$manifest = Get-Content -Raw -Encoding UTF8 AndroidManifest.xml
+          $versionName = [string]$manifest.manifest.versionName
+          $versionCode = [string]$manifest.manifest.versionCode
+          if (-not $versionName -or -not $versionCode) { throw 'AndroidManifest.xml has no version metadata' }
+          ('VERSION_NAME=' + $versionName) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ('VERSION_CODE=' + $versionCode) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ('ARTIFACT_NAME=OPods-v' + $versionName + '-' + $env:ABI_LABEL) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Prepare signing key
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if ($env:ANDROID_KEYSTORE_BASE64) {
+            $bytes = [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64)
+            [IO.File]::WriteAllBytes((Join-Path $PWD 'ci-signing.jks'), $bytes)
+            'SIGNING_KEYSTORE=ci-signing.jks' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            'SIGNING_MODE=secrets' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            'SIGNING_KEYSTORE=.keystore/ci-debug.keystore' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            'SIGNING_MODE=ci-debug' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Output '::warning title=CI debug signature::Configure signing secrets for installable upgrades and tagged releases.'
+          }
+
+      - name: Build signed APK
+        shell: pwsh
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          $keystorePassword = if ($env:ANDROID_KEYSTORE_PASSWORD) { $env:ANDROID_KEYSTORE_PASSWORD } else { 'android' }
+          $keyAlias = if ($env:ANDROID_KEY_ALIAS) { $env:ANDROID_KEY_ALIAS } else { 'androiddebugkey' }
+          $keyPassword = if ($env:ANDROID_KEY_PASSWORD) { $env:ANDROID_KEY_PASSWORD } else { $keystorePassword }
+          $output = Join-Path 'dist' ($env:ARTIFACT_NAME + '.apk')
+          ./build.ps1 `
+            -CompileSdk $env:ANDROID_PLATFORM `
+            -BuildToolsVersion $env:ANDROID_BUILD_TOOLS `
+            -Keystore $env:SIGNING_KEYSTORE `
+            -KeystorePassword $keystorePassword `
+            -KeyAlias $keyAlias `
+            -KeyPassword $keyPassword `
+            -Output $output
+
+          $hash = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash
+          $checksum = Join-Path 'dist' ($env:ARTIFACT_NAME + '.sha256')
+          ($hash + '  ' + (Split-Path -Leaf $output)) | Set-Content -LiteralPath $checksum -Encoding ascii
+
+      - name: Enforce release signing
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          if ($env:SIGNING_MODE -ne 'secrets') {
+            throw 'Tagged releases require ANDROID_KEYSTORE_BASE64 and its password/alias secrets.'
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            dist/OPods-*.apk
+            dist/OPods-*.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && env.SIGNING_MODE == 'secrets'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $title = 'OPods v' + $env:VERSION_NAME + ' ' + $env:ABI_LABEL
+          $files = @(Get-ChildItem -LiteralPath dist -Filter 'OPods-*.apk') +
+                   @(Get-ChildItem -LiteralPath dist -Filter 'OPods-*.sha256')
+          gh release create $tag $files.FullName --title $title --generate-notes
