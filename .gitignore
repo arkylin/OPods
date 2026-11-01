@@ -1,0 +1,22 @@
+# Build output
+/build/
+/build-*/
+/.gradle/
+/local.properties
+
+# Signing material and machine-local settings
+/.keystore/
+*.jks
+*.keystore
+
+# IDE and OS noise
+/.idea/
+/.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Release artifacts live in dist/ and are intentionally tracked.
