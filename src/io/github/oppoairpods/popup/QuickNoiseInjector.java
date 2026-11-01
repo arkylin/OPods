@@ -64,10 +64,12 @@ final class QuickNoiseInjector {
             Injection injection = new Injection(fragment, controller, ownSelector, items, device);
             injection.install(loader);
             ViewGroup parent = (ViewGroup) selector.getParent();
-            parent.addView(ownSelector, parent.indexOfChild(selector),
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT));
-            selector.setVisibility(View.GONE);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            int margin = Math.round(context.getResources().getDisplayMetrics().density * 16.0f);
+            params.setMargins(0, 0, 0, margin);
+            parent.addView(ownSelector, parent.indexOfChild(selector), params);
+            parent.removeView(selector);
             controller.addListener(injection);
             synchronized (INSTALLED) {
                 INSTALLED.put(fragment, injection);
@@ -176,8 +178,8 @@ final class QuickNoiseInjector {
             if (mode == lastMode) return;
             lastMode = mode;
             try {
-                view.getClass().getMethod("d", ArrayList.class, int.class)
-                        .invoke(view, items, selectedIndex(mode));
+                view.getClass().getMethod("setSelectedPosition", int.class)
+                        .invoke(view, selectedIndex(mode));
             } catch (Throwable error) {
                 Logx.w("quick noise refresh failed", error);
             }
