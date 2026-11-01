@@ -2,8 +2,10 @@ package io.github.oppoairpods.popup;
 
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
+import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
@@ -16,6 +18,8 @@ import java.util.WeakHashMap;
 final class QuickNoiseInjector {
     private static final String SELECTOR_CLASS =
             "com.oplus.mydevices.deviceui.devicecard.view.IconTextSelector";
+    private static final String SELECTOR_SETTINGS_CLASS =
+            "com.oplus.mydevices.deviceui.devicecard.view.IconTextSelectorSettings";
     private static final String ITEM_CLASS =
             "com.oplus.mydevices.domain.entities.airpods.IconTextItem";
     private static final String TAG = "opods_quick_noise";
@@ -34,13 +38,21 @@ final class QuickNoiseInjector {
             }
         }
         View selector = findByClass(root, SELECTOR_CLASS);
-        if (selector == null || TAG.equals(selector.getTag())) return;
+        if (selector == null) return;
         Context context = selector.getContext();
         AirPodsController controller = AirPodsController.get(context);
         BluetoothDevice device = controller.findBondedAirPods();
         if (device == null || !controller.isAirPods(device)) return;
         try {
             ClassLoader loader = fragment.getClass().getClassLoader();
+            Class<?> selectorClass = Class.forName(SELECTOR_SETTINGS_CLASS, false, loader);
+            View ownSelector = (View) selectorClass.getConstructor(Context.class, AttributeSet.class)
+                    .newInstance(context, null);
+            ownSelector.setTag(TAG);
+            ownSelector.setVisibility(View.VISIBLE);
+            ownSelector.setAlpha(1.0f);
+            int padding = Math.round(context.getResources().getDisplayMetrics().density * 24.0f);
+            ownSelector.setPadding(padding, 0, padding, 0);
             Class<?> itemClass = Class.forName(ITEM_CLASS, false, loader);
             ArrayList<Object> items = new ArrayList<>();
             items.add(newItem(itemClass, 2, "降噪", "noise", icon(loader, "w"), icon(loader, "x")));
@@ -48,11 +60,13 @@ final class QuickNoiseInjector {
             items.add(newItem(itemClass, 1, "关闭", "off_noise", icon(loader, "u"), icon(loader, "v")));
             items.add(newItem(itemClass, 3, "通透", "trans_noise", icon(loader, "y"), icon(loader, "z")));
 
-            Injection injection = new Injection(fragment, controller, selector, items, device);
+            Injection injection = new Injection(fragment, controller, ownSelector, items, device);
             injection.install(loader);
-            selector.setTag(TAG);
-            selector.setVisibility(View.VISIBLE);
-            selector.setAlpha(1.0f);
+            ViewGroup parent = (ViewGroup) selector.getParent();
+            parent.addView(ownSelector, parent.indexOfChild(selector),
+                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT));
+            selector.setVisibility(View.GONE);
             controller.addListener(injection);
             synchronized (INSTALLED) {
                 INSTALLED.put(fragment, injection);

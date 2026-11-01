@@ -246,7 +246,7 @@ final class OfficialSettingsInjector {
             set(category, "setKey", "oppo_airpods_adaptive_container");
             invoke(category, "I0", new Class<?>[]{int.class}, new Object[]{-1000});
             add(screen, category);
-            Object slider = addSlider(category, "adaptive_strength", "自适应降噪强度",
+            Object slider = addSlider(category, "adaptive_strength_slider", "自适应降噪强度",
                     "拖动调节自适应降噪幅度", 100, getter, setter);
             refreshers.add(() -> {
                 try {
