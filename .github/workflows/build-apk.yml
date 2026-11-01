@@ -18,7 +18,6 @@ concurrency:
 
 env:
   ANDROID_PLATFORM: '37.2'
-  ANDROID_BUILD_TOOLS: '36.1.0'
   ABI_LABEL: 'arm64-v8a'
 
 jobs:
@@ -44,7 +43,6 @@ jobs:
         run: |
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager --install platforms\;android-${ANDROID_PLATFORM}
-          sdkmanager --install build-tools\;${ANDROID_BUILD_TOOLS}
 
       - name: Read version from manifest
         shell: pwsh
@@ -86,7 +84,6 @@ jobs:
           $output = Join-Path 'dist' ($env:ARTIFACT_NAME + '.apk')
           ./build.ps1 `
             -CompileSdk $env:ANDROID_PLATFORM `
-            -BuildToolsVersion $env:ANDROID_BUILD_TOOLS `
             -Keystore $env:SIGNING_KEYSTORE `
             -KeystorePassword $keystorePassword `
             -KeyAlias $keyAlias `
