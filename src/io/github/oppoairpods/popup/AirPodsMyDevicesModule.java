@@ -355,7 +355,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                             item.setPadding(0, top, 0, bottom);
                             if (bar.getParent() != null && bar.getParent().getParent() instanceof View) {
                                 final View content = (View) bar.getParent().getParent();
-                                final int inset = Math.round(density * 28.0f);
+                                final int inset = Math.round(density * 24.0f);
                                 item.post(() -> {
                                     int targetWidth = item.getWidth() - inset * 2;
                                     if (targetWidth <= 0) return;
@@ -379,12 +379,27 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                                 titleRow.setLayoutParams(rowParams);
                                 View valueText = (View) valueView;
                                 ((ViewGroup) valueText.getParent()).removeView(valueText);
+                                int rowPadding = Math.round(density * 4.0f);
+                                titleRow.setPadding(rowPadding, 0, rowPadding, 0);
                                 RelativeLayout.LayoutParams valueParams = new RelativeLayout.LayoutParams(
                                         ViewGroup.LayoutParams.WRAP_CONTENT,
                                         ViewGroup.LayoutParams.WRAP_CONTENT);
                                 valueParams.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
                                 valueParams.addRule(RelativeLayout.CENTER_VERTICAL);
                                 titleRow.addView(valueText, valueParams);
+                            }
+                            if (bar.getParent() instanceof View) {
+                                View sliderRow = (View) bar.getParent();
+                                ViewGroup.LayoutParams rowParams = sliderRow.getLayoutParams();
+                                rowParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                                sliderRow.setLayoutParams(rowParams);
+                                sliderRow.setPadding(0, sliderRow.getPaddingTop(),
+                                        0, sliderRow.getPaddingBottom());
+                                ViewGroup.LayoutParams barParams = bar.getLayoutParams();
+                                barParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                                barParams.height = Math.round(density * 32.0f);
+                                bar.setLayoutParams(barParams);
+                                bar.setPadding(0, bar.getPaddingTop(), 0, bar.getPaddingBottom());
                             }
                             Logx.i("adaptive slider tick marks installed");
                         }

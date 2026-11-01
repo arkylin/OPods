@@ -6,9 +6,9 @@ ColorOS 自带的 MyDevices 与 Bluetooth 进程，复用官方 AirPods 弹窗�
 
 ## 当前版本
 
-- 版本：`v3.4.12`（`versionCode 46`）
-- APK：`dist/OPPO-AirPods-Enhanced-v3.4.12.apk`
-- SHA-256：`8A502AC0A5C63BE52F4916F44319C351009C770369AF77BF71C8FA18970C5826`
+- 版本：`v3.4.13`（`versionCode 47`）
+- APK：`dist/OPPO-AirPods-Enhanced-v3.4.13.apk`
+- SHA-256：`FA2B8BAF72E8CDCC04CF742E7A8507993C9ACDAB0C09A8DEB739B7D39EA1609C`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 已验证结果：MyDevices 官方 AirPods 设置页可显示增强条目；官方弹窗和 AACP 控制链路可用
 
