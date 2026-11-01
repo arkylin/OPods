@@ -73,7 +73,7 @@ function Find-BuildToolsDir {
 foreach ($path in @($manifest, $resDir, $xposedDir, $libxposed)) {
     if (-not (Test-Path -LiteralPath $path)) { throw ('Required path missing: ' + $path) }
 }
-foreach ($command in @('javac.exe', 'jar.exe', 'keytool.exe')) {
+foreach ($command in @('javac', 'jar', 'keytool')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw ($command + ' is not on PATH. Install a JDK 17+ and reopen the terminal.')
     }
