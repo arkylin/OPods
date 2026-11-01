@@ -18,5 +18,6 @@ Thumbs.db
 
 # Logs
 *.log
+*.idsig
 
 # Release artifacts live in dist/ and are intentionally tracked.

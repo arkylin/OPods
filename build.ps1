@@ -7,7 +7,7 @@ param(
     [string]$KeystorePassword = 'android',
     [string]$KeyAlias = 'androiddebugkey',
     [string]$KeyPassword = 'android',
-    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.apk'
+    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.1.apk'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +50,12 @@ function Find-PlatformDir {
     }
     $dirs = Get-ChildItem -LiteralPath $platformsRoot -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^android-\d+(\.\d+)?$' } |
-        Sort-Object { [version](($_.Name -replace '^android-', '')) } -Descending
+        Sort-Object {
+            $parts = ($_.Name -replace '^android-', '') -split '\.'
+            $major = [int]$parts[0]
+            $minor = if ($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
+            $major * 1000 + $minor
+        } -Descending
     if (-not $dirs) { throw ('No Android platform found under ' + $platformsRoot) }
     return $dirs[0].FullName
 }

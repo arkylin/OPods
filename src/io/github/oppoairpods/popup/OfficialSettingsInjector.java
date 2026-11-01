@@ -78,10 +78,6 @@ final class OfficialSettingsInjector {
             if (sound == null) sound = screen;
             if (settings == null) settings = screen;
 
-            addList(sound, "noise", "噪声控制", new String[]{"关闭", "降噪", "通透", "自适应"},
-                    new String[]{"1", "2", "3", "4"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, Integer.parseInt(value)));
             addList(sound, "adaptive_strength", "自适应降噪强度",
                     new String[]{"0", "20", "40", "60", "80", "100"},
                     new String[]{"0", "20", "40", "60", "80", "100"},
@@ -323,36 +319,68 @@ final class OfficialSettingsInjector {
         }
 
         private static void setChangeListener(Object preference, ChangeHandler handler) throws Exception {
-            Method setter = null;
-            Class<?> listener = null;
-            for (Method method : preference.getClass().getMethods()) {
-                if (method.getName().equals("setOnPreferenceChangeListener") && method.getParameterCount() == 1) {
-                    setter = method;
-                    listener = method.getParameterTypes()[0];
-                    break;
-                }
+            Method setter = findSetter(preference, "setOnPreferenceChangeListener", "G0");
+            if (setter == null) {
+                Logx.w("no change listener method on " + preference.getClass().getName(), null);
+                return;
             }
-            if (setter == null || listener == null) return;
+            Class<?> listener = setter.getParameterTypes()[0];
             Object proxy = Proxy.newProxyInstance(listener.getClassLoader(), new Class<?>[]{listener},
-                    (proxy1, method, args) -> method.getName().equals("onPreferenceChange")
-                            ? handler.onChange(args != null && args.length > 1 ? args[1] : null) : null);
+                    (proxy1, method, args) -> {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return objectMethod(proxy1, method, args);
+                        }
+                        String name = method.getName();
+                        if (("onPreferenceChange".equals(name) || "a".equals(name))
+                                && args != null && args.length > 1) {
+                            return handler.onChange(args[1]);
+                        }
+                        return defaultValue(method.getReturnType());
+                    });
             setter.invoke(preference, proxy);
         }
 
         private static void setClickListener(Object preference, ClickHandler handler) throws Exception {
-            Method setter = null;
-            Class<?> listener = null;
-            for (Method method : preference.getClass().getMethods()) {
-                if (method.getName().equals("setOnPreferenceClickListener") && method.getParameterCount() == 1) {
-                    setter = method;
-                    listener = method.getParameterTypes()[0];
-                    break;
+            Method setter = findSetter(preference, "setOnPreferenceClickListener", "H0");
+            if (setter == null) {
+                Logx.w("no click listener method on " + preference.getClass().getName(), null);
+                return;
+            }
+            Class<?> listener = setter.getParameterTypes()[0];
+            Object proxy = Proxy.newProxyInstance(listener.getClassLoader(), new Class<?>[]{listener},
+                    (proxy1, method, args) -> {
+                        if (method.getDeclaringClass() == Object.class) {
+                            return objectMethod(proxy1, method, args);
+                        }
+                        String name = method.getName();
+                        if ("onPreferenceClick".equals(name) || "a".equals(name)) {
+                            return handler.onClick();
+                        }
+                        return defaultValue(method.getReturnType());
+                    });
+            setter.invoke(preference, proxy);
+        }
+
+        private static Method findSetter(Object preference, String... names) {
+            for (String name : names) {
+                for (Method method : preference.getClass().getMethods()) {
+                    if (method.getName().equals(name) && method.getParameterCount() == 1) {
+                        return method;
+                    }
                 }
             }
-            if (setter == null || listener == null) return;
-            Object proxy = Proxy.newProxyInstance(listener.getClassLoader(), new Class<?>[]{listener},
-                    (proxy1, method, args) -> method.getName().equals("onPreferenceClick") ? handler.onClick() : null);
-            setter.invoke(preference, proxy);
+            return null;
+        }
+
+        private static Object objectMethod(Object proxy, Method method, Object[] args) {
+            if ("toString".equals(method.getName())) return "AirPodsPreferenceListener";
+            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
+            if ("equals".equals(method.getName())) return args != null && args.length == 1 && proxy == args[0];
+            return null;
+        }
+
+        private static Object defaultValue(Class<?> type) {
+            return type == boolean.class ? Boolean.FALSE : null;
         }
 
         private static Object find(Object screen, String key) {
