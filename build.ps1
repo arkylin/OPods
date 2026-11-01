@@ -122,7 +122,7 @@ $sources = Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -Filter '
 if (-not $sources) { throw 'No Java sources found under src/' }
 
 Write-Host ('Compiling ' + $sources.Count + ' Java files...')
-& javac -encoding UTF-8 -cp ($androidJar + ';' + $libxposed) -d $classesDir $sources
+& javac -encoding UTF-8 -cp ($androidJar + [System.IO.Path]::PathSeparator + $libxposed) -d $classesDir $sources
 if ($LASTEXITCODE -ne 0) { throw 'javac failed' }
 
 $classesJar = Join-Path $buildFull 'classes.jar'
