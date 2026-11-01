@@ -178,8 +178,10 @@ final class QuickNoiseInjector {
             if (mode == lastMode) return;
             lastMode = mode;
             try {
-                view.getClass().getMethod("setSelectedPosition", int.class)
-                        .invoke(view, selectedIndex(mode));
+                java.lang.reflect.Method select = view.getClass()
+                        .getDeclaredMethod("setSelectedPosition", int.class);
+                select.setAccessible(true);
+                select.invoke(view, selectedIndex(mode));
             } catch (Throwable error) {
                 Logx.w("quick noise refresh failed", error);
             }

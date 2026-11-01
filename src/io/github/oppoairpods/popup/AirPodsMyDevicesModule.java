@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.view.View;
+import android.widget.SeekBar;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -59,6 +60,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         hookScanCallback(loader);
         hookSettingsPage(loader);
         hookSettingsActivity(loader);
+        hookAdaptiveSlider(loader);
         hookDetailPanel(loader);
         DisconnectFilter.install(this, loader);
         Logx.i("MyDevices hooks installed");
@@ -298,6 +300,47 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             Logx.i("detail panel hook installed");
         } catch (Throwable error) {
             Logx.w("detail panel hook failed", error);
+        }
+    }
+
+    private void hookAdaptiveSlider(ClassLoader loader) {
+        try {
+            Class<?> seekPreference = Class.forName(
+                    "androidx.preference.SeekBarPreference", false, loader);
+            Method bind = null;
+            for (Method method : seekPreference.getDeclaredMethods()) {
+                if ("Z".equals(method.getName()) && method.getParameterCount() == 1) {
+                    bind = method;
+                    break;
+                }
+            }
+            if (bind == null) throw new NoSuchMethodException("SeekBarPreference.Z");
+            hook(bind).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Object preference = chain.getThisObject();
+                    Object key = call(preference, "w");
+                    if ("oppo_airpods_adaptive_strength_slider".equals(key)) {
+                        Field field = seekPreference.getField("W");
+                        Object value = field.get(preference);
+                        if (value instanceof SeekBar) {
+                            SeekBar bar = (SeekBar) value;
+                            int radius = Math.max(2, Math.round(
+                                    bar.getResources().getDisplayMetrics().density * 2.0f));
+                            bar.setTickMark(new SliderTickDrawable(bar, radius));
+                            bar.setKeyProgressIncrement(20);
+                            bar.setSplitTrack(false);
+                            Logx.i("adaptive slider tick marks installed");
+                        }
+                    }
+                } catch (Throwable error) {
+                    Logx.w("adaptive slider binding decoration failed", error);
+                }
+                return result;
+            });
+            Logx.i("adaptive slider binding hook installed");
+        } catch (Throwable error) {
+            Logx.w("adaptive slider binding hook failed", error);
         }
     }
 
