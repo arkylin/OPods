@@ -80,7 +80,7 @@ final class OfficialSettingsInjector {
             if (settings == null) settings = screen;
 
             try {
-                addSlider(sound, "adaptive_strength", "自适应降噪强度", "拖动调节自适应降噪幅度", 100,
+                addAdaptiveSlider(screen,
                         () -> controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
                         value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
             } catch (Throwable error) {
@@ -205,7 +205,7 @@ final class OfficialSettingsInjector {
             });
         }
 
-        private void addSlider(Object group, String key, String title, String summary, int max,
+        private Object addSlider(Object group, String key, String title, String summary, int max,
                                Supplier<Integer> getter, Consumer<Integer> setter) throws Exception {
             Object preference = newPreference("androidx.preference.SeekBarPreference",
                     new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
@@ -235,6 +235,26 @@ final class OfficialSettingsInjector {
                     invoke(preference, "X0", new Class<?>[]{int.class}, new Object[]{current});
                 } catch (Throwable error) {
                     Logx.w("adaptive slider refresh failed", error);
+                }
+            });
+            return preference;
+        }
+
+        private void addAdaptiveSlider(Object screen, Supplier<Integer> getter, Consumer<Integer> setter) throws Exception {
+            Object category = newPreference("com.coui.appcompat.preference.COUIPreferenceCategory",
+                    new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
+            set(category, "setKey", "oppo_airpods_adaptive_container");
+            invoke(category, "I0", new Class<?>[]{int.class}, new Object[]{-1000});
+            add(screen, category);
+            Object slider = addSlider(category, "adaptive_strength", "自适应降噪强度",
+                    "拖动调节自适应降噪幅度", 100, getter, setter);
+            refreshers.add(() -> {
+                try {
+                    boolean adaptive = controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1) == 4;
+                    invoke(category, "P0", new Class<?>[]{boolean.class}, new Object[]{adaptive});
+                    invoke(slider, "P0", new Class<?>[]{boolean.class}, new Object[]{adaptive});
+                } catch (Throwable error) {
+                    Logx.w("adaptive slider visibility failed", error);
                 }
             });
         }

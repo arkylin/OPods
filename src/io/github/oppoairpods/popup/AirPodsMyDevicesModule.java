@@ -3,6 +3,7 @@ package io.github.oppoairpods.popup;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
+import android.view.View;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -58,6 +59,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         hookScanCallback(loader);
         hookSettingsPage(loader);
         hookSettingsActivity(loader);
+        hookDetailPanel(loader);
         DisconnectFilter.install(this, loader);
         Logx.i("MyDevices hooks installed");
     }
@@ -260,6 +262,42 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             });
         } catch (Throwable error) {
             Logx.w("settings page hook failed", error);
+        }
+    }
+
+    private void hookDetailPanel(ClassLoader loader) {
+        try {
+            Class<?> panel = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.ui.AirpodsDetailPanelFragment",
+                    false, loader);
+            Method bind = panel.getDeclaredMethod("bindPanelBodyViews", View.class);
+            hook(bind).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    QuickNoiseInjector.install(chain.getThisObject(), (View) chain.getArg(0));
+                } catch (Throwable error) {
+                    Logx.w("quick noise panel injection failed", error);
+                }
+                return result;
+            });
+            Method init = panel.getDeclaredMethod("initView", View.class);
+            hook(init).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    QuickNoiseInjector.install(chain.getThisObject(), (View) chain.getArg(0));
+                } catch (Throwable error) {
+                    Logx.w("quick noise panel init failed", error);
+                }
+                return result;
+            });
+            Method clear = panel.getDeclaredMethod("clearPanelBodyViewRefs");
+            hook(clear).intercept(chain -> {
+                QuickNoiseInjector.release(chain.getThisObject());
+                return chain.proceed();
+            });
+            Logx.i("detail panel hook installed");
+        } catch (Throwable error) {
+            Logx.w("detail panel hook failed", error);
         }
     }
 
