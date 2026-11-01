@@ -3,7 +3,12 @@ package io.github.oppoairpods.popup;
 import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 
 import java.lang.reflect.Constructor;
@@ -325,11 +330,51 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         Object value = field.get(preference);
                         if (value instanceof SeekBar) {
                             SeekBar bar = (SeekBar) value;
-                            int radius = Math.max(2, Math.round(
-                                    bar.getResources().getDisplayMetrics().density * 2.0f));
-                            bar.setTickMark(new SliderTickDrawable(bar, radius));
+                            float density = bar.getResources().getDisplayMetrics().density;
+                            int radius = Math.max(2, Math.round(density * 2.0f));
+                            int trackHeight = Math.max(6, Math.round(density * 9.0f));
+                            bar.setBackground(new SliderTickDrawable(bar, radius, trackHeight));
+                            bar.setProgressDrawable(new ColorDrawable(Color.TRANSPARENT));
+                            GradientDrawable thumb = new GradientDrawable();
+                            thumb.setShape(GradientDrawable.OVAL);
+                            thumb.setColor(Color.WHITE);
+                            thumb.setStroke(Math.max(2, Math.round(density * 2.0f)), 0xFF3478F6);
+                            int thumbSize = Math.round(density * 20.0f);
+                            thumb.setSize(thumbSize, thumbSize);
+                            bar.setThumb(thumb);
                             bar.setKeyProgressIncrement(25);
                             bar.setSplitTrack(false);
+                            Object holder = chain.getArg(0);
+                            View item = (View) holder.getClass().getField("itemView").get(holder);
+                            GradientDrawable card = new GradientDrawable();
+                            card.setColor(Color.WHITE);
+                            card.setCornerRadius(density * 24.0f);
+                            item.setBackground(card);
+                            int horizontal = Math.round(density * 24.0f);
+                            int top = Math.round(density * 12.0f);
+                            int bottom = Math.round(density * 16.0f);
+                            item.setPadding(horizontal, top, horizontal, bottom);
+
+                            View title = item.findViewById(android.R.id.title);
+                            Field valueField = seekPreference.getDeclaredField("X");
+                            valueField.setAccessible(true);
+                            Object valueView = valueField.get(preference);
+                            if (title != null && valueView instanceof View
+                                    && title.getParent() instanceof RelativeLayout
+                                    && ((View) valueView).getParent() instanceof ViewGroup) {
+                                RelativeLayout titleRow = (RelativeLayout) title.getParent();
+                                ViewGroup.LayoutParams rowParams = titleRow.getLayoutParams();
+                                rowParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                                titleRow.setLayoutParams(rowParams);
+                                View valueText = (View) valueView;
+                                ((ViewGroup) valueText.getParent()).removeView(valueText);
+                                RelativeLayout.LayoutParams valueParams = new RelativeLayout.LayoutParams(
+                                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                                valueParams.addRule(RelativeLayout.ALIGN_PARENT_RIGHT);
+                                valueParams.addRule(RelativeLayout.CENTER_VERTICAL);
+                                titleRow.addView(valueText, valueParams);
+                            }
                             Logx.i("adaptive slider tick marks installed");
                         }
                     }
