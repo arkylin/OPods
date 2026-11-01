@@ -350,10 +350,21 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                             card.setColor(Color.WHITE);
                             card.setCornerRadius(density * 24.0f);
                             item.setBackground(card);
-                            int horizontal = Math.round(density * 24.0f);
                             int top = Math.round(density * 12.0f);
                             int bottom = Math.round(density * 16.0f);
-                            item.setPadding(horizontal, top, horizontal, bottom);
+                            item.setPadding(0, top, 0, bottom);
+                            if (bar.getParent() != null && bar.getParent().getParent() instanceof View) {
+                                final View content = (View) bar.getParent().getParent();
+                                final int inset = Math.round(density * 28.0f);
+                                item.post(() -> {
+                                    int targetWidth = item.getWidth() - inset * 2;
+                                    if (targetWidth <= 0) return;
+                                    ViewGroup.LayoutParams params = content.getLayoutParams();
+                                    params.width = targetWidth;
+                                    content.setLayoutParams(params);
+                                    item.post(() -> content.setTranslationX(inset - content.getLeft()));
+                                });
+                            }
 
                             View title = item.findViewById(android.R.id.title);
                             Field valueField = seekPreference.getDeclaredField("X");
