@@ -43,7 +43,8 @@ jobs:
         shell: bash
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install 'platforms;android-'${ANDROID_PLATFORM} 'build-tools;'${ANDROID_BUILD_TOOLS}
+          sdkmanager --install platforms\;android-${ANDROID_PLATFORM}
+          sdkmanager --install build-tools\;${ANDROID_BUILD_TOOLS}
 
       - name: Read version from manifest
         shell: pwsh
