@@ -72,6 +72,7 @@ final class OfficialSettingsInjector {
             if (!controller.isAirPods(device)) return false;
             controller.onSettingsPageOpened(device);
             controller.addListener(this);
+            FeatureSupportEnabler.afterFeatureSupport(call(fragment.get(), "getActivity"));
 
             Object sound = find(screen, "cat_airpods_sound_quality");
             Object settings = find(screen, "cat_airpods_settings");
