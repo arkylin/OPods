@@ -60,7 +60,8 @@ function Find-BuildToolsDir {
     $toolsRoot = Join-Path $Sdk 'build-tools'
     if ($Requested) {
         $path = Join-Path $toolsRoot $Requested
-        if (Test-Path -LiteralPath (Join-Path $path 'd8.bat')) { return $path }
+        if ((Test-Path -LiteralPath (Join-Path $path 'd8')) -or
+            (Test-Path -LiteralPath (Join-Path $path 'd8.bat'))) { return $path }
         throw ('Android build-tools not found: ' + $path)
     }
     $dirs = Get-ChildItem -LiteralPath $toolsRoot -Directory -ErrorAction SilentlyContinue |
@@ -68,6 +69,15 @@ function Find-BuildToolsDir {
         Sort-Object { [version]$_.Name } -Descending
     if (-not $dirs) { throw ('No Android build-tools found under ' + $toolsRoot) }
     return $dirs[0].FullName
+}
+
+function Resolve-SdkTool {
+    param([string]$Directory, [string]$Name)
+    foreach ($candidate in @($Name, ($Name + '.exe'), ($Name + '.bat'))) {
+        $path = Join-Path $Directory $candidate
+        if (Test-Path -LiteralPath $path) { return $path }
+    }
+    throw ('Build tool missing: ' + $Name + ' in ' + $Directory)
 }
 
 foreach ($path in @($manifest, $resDir, $xposedDir, $libxposed)) {
@@ -83,10 +93,10 @@ $sdk = Resolve-AndroidSdk $AndroidSdk
 $platform = Find-PlatformDir $sdk $CompileSdk
 $buildTools = Find-BuildToolsDir $sdk $BuildToolsVersion
 $androidJar = Join-Path $platform 'android.jar'
-$aapt2 = Join-Path $buildTools 'aapt2.exe'
-$d8 = Join-Path $buildTools 'd8.bat'
-$zipalign = Join-Path $buildTools 'zipalign.exe'
-$apksigner = Join-Path $buildTools 'apksigner.bat'
+$aapt2 = Resolve-SdkTool $buildTools 'aapt2'
+$d8 = Resolve-SdkTool $buildTools 'd8'
+$zipalign = Resolve-SdkTool $buildTools 'zipalign'
+$apksigner = Resolve-SdkTool $buildTools 'apksigner'
 foreach ($tool in @($androidJar, $aapt2, $d8, $zipalign, $apksigner)) {
     if (-not (Test-Path -LiteralPath $tool)) { throw ('Build tool missing: ' + $tool) }
 }
