@@ -1,0 +1,286 @@
+package io.github.oppoairpods.popup;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+/** Framing and packet builders for Apple Accessory Communication Protocol over BR/EDR L2CAP. */
+final class AacpProtocol {
+    static final int PSM = 0x1001;
+    static final byte[] HEADER = {4, 0, 4, 0};
+    static final byte[] HANDSHAKE = {0, 0, 4, 0, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+    static final int OP_BATTERY = 0x04;
+    static final int OP_EAR_DETECTION = 0x06;
+    static final int OP_CONTROL = 0x09;
+    static final int OP_INFORMATION = 0x1D;
+    static final int OP_EQUALIZER = 0x63;
+
+    static final int CONTROL_LISTENING_MODE = 0x0D;
+    static final int CONTROL_MICROPHONE = 0x01;
+    static final int CONTROL_SINGLE_EAR_ANC = 0x1B;
+    static final int CONTROL_CONVERSATION = 0x28;
+    static final int CONTROL_ADAPTIVE_VOLUME = 0x26;
+    static final int CONTROL_ADAPTIVE_STRENGTH = 0x2E;
+    static final int CONTROL_ALLOW_OFF = 0x34;
+    static final int CONTROL_EAR_DETECTION = 0x0A;
+    static final int CONTROL_PRESS_SPEED = 0x17;
+    static final int CONTROL_PRESS_HOLD = 0x18;
+    static final int CONTROL_VOLUME_SWIPE = 0x25;
+    static final int CONTROL_VOLUME_SWIPE_DURATION = 0x23;
+    static final int CONTROL_TONE_VOLUME = 0x1F;
+    static final int CONTROL_SLEEP_DETECTION = 0x35;
+    static final int CONTROL_OPTIMIZED_CHARGING = 0x3B;
+    static final int CONTROL_CALL_MANAGEMENT = 0x24;
+    static final int CONTROL_HEARING_AID = 0x2C;
+    static final int CONTROL_HEARING_ASSIST = 0x33;
+
+    private AacpProtocol() {}
+
+    static byte[] features() {
+        return concat(HEADER, new byte[]{0x4D, 0, (byte) 0xD7, 0, 0, 0, 0, 0, 0, 0});
+    }
+
+    static byte[] notifications() {
+        return concat(HEADER, new byte[]{0x0F, 0, -1, -1, -1, -1});
+    }
+
+    static byte[] keyRequest(int type) {
+        return concat(HEADER, new byte[]{0x30, 0, (byte) type, 0});
+    }
+    static byte[] control(int id, int... values) {
+        byte[] packet = new byte[11];
+        System.arraycopy(HEADER, 0, packet, 0, 4);
+        packet[4] = 0x09;
+        packet[5] = 0;
+        packet[6] = (byte) id;
+        for (int i = 0; i < 4; i++) packet[7 + i] = (byte) (i < values.length ? values[i] : 0);
+        return packet;
+    }
+
+    static byte[] equalizer(int enabled, int low, int mid, int high) {
+        return concat(HEADER, new byte[]{0x63, 0, 5, 0, 1, (byte) enabled,
+                (byte) clamp(low), (byte) clamp(mid), (byte) clamp(high)});
+    }
+
+    private static int clamp(int value) {
+        return Math.max(0, Math.min(100, value));
+    }
+
+    private static byte[] concat(byte[] first, byte[] second) {
+        byte[] result = Arrays.copyOf(first, first.length + second.length);
+        System.arraycopy(second, 0, result, first.length, second.length);
+        return result;
+    }
+
+    static final class Event {
+        static final int TYPE_BATTERY = 1;
+        static final int TYPE_CONTROL = 2;
+        static final int TYPE_WEAR = 3;
+        static final int TYPE_INFO = 4;
+        static final int TYPE_EQUALIZER = 5;
+        static final int TYPE_CONVERSATION = 6;
+
+        final int type;
+        int left = -1;
+        int right = -1;
+        int caseLevel = -1;
+        int chargingMask;
+        int controlId = -1;
+        int[] values = new int[0];
+        int primaryWear = -1;
+        int secondaryWear = -1;
+        String name = "";
+        String modelNumber = "";
+        String firmware = "";
+        int eqState;
+        int eqLow;
+        int eqMid;
+        int eqHigh;
+        int conversationSubtype;
+        int conversationStatus;
+
+        Event(int type) {
+            this.type = type;
+        }
+    }
+
+    static Event parse(byte[] packet) {
+        if (packet == null || packet.length < 6 || !startsWith(packet, HEADER)) return null;
+        int opcode = u(packet, 4);
+        switch (opcode) {
+            case OP_BATTERY:
+                return parseBattery(packet);
+            case OP_CONTROL:
+                if (packet.length < 8) return null;
+                Event control = new Event(Event.TYPE_CONTROL);
+                control.controlId = u(packet, 6);
+                int size = Math.min(4, packet.length - 7);
+                control.values = new int[size];
+                for (int i = 0; i < size; i++) control.values[i] = u(packet, 7 + i);
+                return control;
+            case OP_EAR_DETECTION:
+                if (packet.length != 8) return null;
+                Event wear = new Event(Event.TYPE_WEAR);
+                wear.primaryWear = u(packet, 6);
+                wear.secondaryWear = u(packet, 7);
+                if (wear.primaryWear > 3 || wear.secondaryWear > 3) return null;
+                return wear;
+            case OP_INFORMATION:
+                return parseInformation(packet);
+            case OP_EQUALIZER:
+                if (packet.length < 13 || u(packet, 6) != 5 || u(packet, 7) != 0) return null;
+                Event eq = new Event(Event.TYPE_EQUALIZER);
+                eq.eqState = u(packet, 9);
+                eq.eqLow = u(packet, 10);
+                eq.eqMid = u(packet, 11);
+                eq.eqHigh = u(packet, 12);
+                if (eq.eqState < 1 || eq.eqState > 2 || eq.eqLow > 100 || eq.eqMid > 100 || eq.eqHigh > 100) return null;
+                return eq;
+            case 0x4B:
+                if (packet.length < 8) return null;
+                Event conversation = new Event(Event.TYPE_CONVERSATION);
+                conversation.conversationSubtype = packet.length >= 10 ? u(packet, 8) : 0;
+                conversation.conversationStatus = packet.length >= 10 ? u(packet, 9) : 0;
+                return conversation;
+            default:
+                return null;
+        }
+    }
+
+    private static Event parseBattery(byte[] packet) {
+        if (packet.length < 7) return null;
+        int count = u(packet, 6);
+        if (count < 1 || count > 8 || packet.length < 7 + count * 5) return null;
+        Event event = new Event(Event.TYPE_BATTERY);
+        for (int i = 0; i < count; i++) {
+            int pos = 7 + i * 5;
+            int component = u(packet, pos);
+            int level = u(packet, pos + 2);
+            int status = u(packet, pos + 3);
+            if (component == 2) event.right = level <= 100 && status != 4 ? level : -1;
+            else if (component == 4) event.left = level <= 100 && status != 4 ? level : -1;
+            else if (component == 8) event.caseLevel = level <= 100 && status != 4 ? level : -1;
+            if (status == 1) {
+                if (component == 2) event.chargingMask |= 2;
+                else if (component == 4) event.chargingMask |= 1;
+                else if (component == 8) event.chargingMask |= 4;
+            }
+        }
+        return event;
+    }
+
+    private static Event parseInformation(byte[] packet) {
+        String text = new String(packet, 6, packet.length - 6, StandardCharsets.UTF_8);
+        String[] fields = text.split("\u0000");
+        int modelIndex = -1;
+        for (int i = 0; i < fields.length; i++) {
+            if (fields[i].matches("A[0-9]{4}")) {
+                modelIndex = i;
+                break;
+            }
+        }
+        if (modelIndex < 0) return null;
+        Event event = new Event(Event.TYPE_INFO);
+        event.name = modelIndex > 0 && !fields[modelIndex - 1].trim().isEmpty()
+                ? fields[modelIndex - 1].trim() : "AirPods";
+        event.modelNumber = fields[modelIndex].trim();
+        for (int i = modelIndex + 1; i < fields.length; i++) {
+            String value = fields[i].trim();
+            if (value.matches("[0-9]+[A-Z][0-9]+[a-zA-Z]?")) {
+                event.firmware = value;
+                break;
+            }
+        }
+        return event;
+    }
+
+    private static boolean startsWith(byte[] data, byte[] prefix) {
+        if (data.length < prefix.length) return false;
+        for (int i = 0; i < prefix.length; i++) if (data[i] != prefix[i]) return false;
+        return true;
+    }
+
+    private static int u(byte[] data, int index) {
+        return data[index] & 0xFF;
+    }
+
+    /** AACP may coalesce several packets in one L2CAP read; keep only complete frames. */
+    static final class Framer {
+        private byte[] pending = new byte[0];
+
+        List<byte[]> feed(byte[] data) {
+            List<byte[]> result = new ArrayList<>();
+            if (data == null || data.length == 0) return result;
+            if (pending.length + data.length > 65536) pending = new byte[0];
+            byte[] combined = new byte[pending.length + data.length];
+            System.arraycopy(pending, 0, combined, 0, pending.length);
+            System.arraycopy(data, 0, combined, pending.length, data.length);
+            pending = combined;
+            while (pending.length >= 4) {
+                if (pending[0] == 0 && pending[1] == 0 && pending[2] == 4 && pending[3] == 0) {
+                    if (pending.length < 16) break;
+                    pending = Arrays.copyOfRange(pending, 16, pending.length);
+                    continue;
+                }
+                if (pending[0] != 4 || pending[1] != 0 || pending[2] != 4 || pending[3] != 0) {
+                    pending = Arrays.copyOfRange(pending, 1, pending.length);
+                    continue;
+                }
+                if (pending.length < 7) break;
+                int size = frameLength(pending);
+                if (size < 0) {
+                    pending = new byte[0];
+                    break;
+                }
+                if (size < 6 || size > 4096) {
+                    int next = nextHeader(pending, 4);
+                    if (next < 0) {
+                        pending = new byte[0];
+                        break;
+                    }
+                    pending = Arrays.copyOfRange(pending, next, pending.length);
+                    continue;
+                }
+                if (pending.length < size) break;
+                result.add(Arrays.copyOfRange(pending, 0, size));
+                pending = Arrays.copyOfRange(pending, size, pending.length);
+            }
+            return result;
+        }
+
+        private static int frameLength(byte[] packet) {
+            int opcode = packet[4] & 0xFF;
+            switch (opcode) {
+                case OP_BATTERY:
+                    return 7 + (packet[6] & 0xFF) * 5;
+                case OP_CONTROL:
+                    return 11;
+                case OP_EAR_DETECTION:
+                    return 8;
+                case OP_EQUALIZER:
+                    return 13;
+                case 0x4B: {
+                    if (packet.length < 8) return -1;
+                    int payload = (packet[6] & 0xFF) | ((packet[7] & 0xFF) << 8);
+                    return payload >= 1 && payload <= 64 ? 8 + payload : -1;
+                }
+                case 0x0E:
+                    return 13;
+                default: {
+                    int next = nextHeader(packet, 4);
+                    return next < 0 ? packet.length : next;
+                }
+            }
+        }
+
+        private static int nextHeader(byte[] data, int from) {
+            for (int i = from; i + 4 <= data.length; i++) {
+                if (data[i] == 4 && data[i + 1] == 0 && data[i + 2] == 4 && data[i + 3] == 0) return i;
+            }
+            return -1;
+        }
+    }
+}
+
