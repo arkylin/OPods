@@ -49,7 +49,12 @@ final class NativeAirPodsControl {
             synchronized (NativeAirPodsControl.class) {
                 if (constructor == null && !unavailable) {
                     try {
-                        Class<?> type = Class.forName("com.oplus.bluetooth.OplusBluetoothDevice");
+                        Class<?> type;
+                        try {
+                            type = Class.forName("android.bluetooth.OplusBluetoothDevice");
+                        } catch (ClassNotFoundException missing) {
+                            type = Class.forName("com.oplus.bluetooth.OplusBluetoothDevice");
+                        }
                         constructor = type.getConstructor(BluetoothDevice.class);
                         getter = type.getMethod("getExtendFeatureStatus", int.class);
                         setter = type.getMethod("setExtendFeatureStatus", int.class, int.class);
