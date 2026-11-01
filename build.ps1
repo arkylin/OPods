@@ -104,8 +104,9 @@ foreach ($tool in @($androidJar, $aapt2, $d8, $zipalign, $apksigner)) {
 $buildDir = Join-Path $root 'build'
 $buildFull = [System.IO.Path]::GetFullPath($buildDir)
 $rootFull = [System.IO.Path]::GetFullPath($root)
-$rootPrefix = $rootFull.TrimEnd('\') + '\'
-if (-not $buildFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+$buildCompare = $buildFull.Replace('\', '/')
+$rootCompare = $rootFull.Replace('\', '/').TrimEnd('/') + '/'
+if (-not $buildCompare.StartsWith($rootCompare, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw ('Refusing to clean a build directory outside the repository: ' + $buildFull)
 }
 if (Test-Path -LiteralPath $buildFull) {
