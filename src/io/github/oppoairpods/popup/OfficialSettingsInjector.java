@@ -79,11 +79,18 @@ final class OfficialSettingsInjector {
             if (sound == null) sound = screen;
             if (settings == null) settings = screen;
 
-            addList(sound, "adaptive_strength", "自适应降噪强度",
-                    new String[]{"0", "20", "40", "60", "80", "100"},
-                    new String[]{"0", "20", "40", "60", "80", "100"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, Integer.parseInt(value)));
+            try {
+                addSlider(sound, "adaptive_strength", "自适应降噪强度", "拖动调节自适应降噪幅度", 100,
+                        () -> controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
+                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
+            } catch (Throwable error) {
+                Logx.w("adaptive slider unavailable, falling back to list", error);
+                addList(sound, "adaptive_strength", "自适应降噪强度",
+                        new String[]{"0", "20", "40", "60", "80", "100"},
+                        new String[]{"0", "20", "40", "60", "80", "100"},
+                        () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50)),
+                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, Integer.parseInt(value)));
+            }
 
             addSwitch(settings, "auto_connect", "自动连接", "开盖后自动连接并显示官方弹窗",
                     controller::autoConnect, controller::setAutoConnect);
@@ -195,6 +202,40 @@ final class OfficialSettingsInjector {
                 String current = getter.get();
                 set(preference, "setValue", current);
                 set(preference, "setSummary", label(labels, values, current));
+            });
+        }
+
+        private void addSlider(Object group, String key, String title, String summary, int max,
+                               Supplier<Integer> getter, Consumer<Integer> setter) throws Exception {
+            Object preference = newPreference("androidx.preference.SeekBarPreference",
+                    new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
+            set(preference, "setKey", "oppo_airpods_" + key);
+            set(preference, "setTitle", title);
+            set(preference, "setSummary", summary);
+            set(preference, "setPersistent", false);
+            invoke(preference, "V0", new Class<?>[]{int.class}, new Object[]{max});
+            try {
+                setField(preference, "Z", true);
+            } catch (Throwable error) {
+                Logx.w("seekbar value label unavailable", error);
+            }
+            int initial = getter.get();
+            invoke(preference, "X0", new Class<?>[]{int.class}, new Object[]{initial});
+            setChangeListener(preference, value -> {
+                if (!(value instanceof Number)) return false;
+                int progress = ((Number) value).intValue();
+                setter.accept(progress);
+                set(preference, "setSummary", summary + " · " + progress);
+                return true;
+            });
+            add(group, preference);
+            refreshers.add(() -> {
+                try {
+                    int current = getter.get();
+                    invoke(preference, "X0", new Class<?>[]{int.class}, new Object[]{current});
+                } catch (Throwable error) {
+                    Logx.w("adaptive slider refresh failed", error);
+                }
             });
         }
 
@@ -371,6 +412,32 @@ final class OfficialSettingsInjector {
                 }
             }
             return null;
+        }
+
+        private static void invoke(Object target, String name, Class<?>[] types, Object[] args) throws Exception {
+            for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+                try {
+                    Method method = type.getDeclaredMethod(name, types);
+                    method.setAccessible(true);
+                    method.invoke(target, args);
+                    return;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+            throw new NoSuchMethodException(name);
+        }
+
+        private static void setField(Object target, String name, boolean value) throws Exception {
+            for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+                try {
+                    java.lang.reflect.Field field = type.getDeclaredField(name);
+                    field.setAccessible(true);
+                    field.setBoolean(target, value);
+                    return;
+                } catch (NoSuchFieldException ignored) {
+                }
+            }
+            throw new NoSuchFieldException(name);
         }
 
         private static Object objectMethod(Object proxy, Method method, Object[] args) {
