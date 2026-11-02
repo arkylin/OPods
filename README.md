@@ -8,7 +8,8 @@
 - 版本：`v3.4.27`（`versionCode 61`）
 - GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
 - 发布 APK：`OPods-v3.4.27-arm64-v8a.apk`（由 GitHub Actions 构建）
-- SHA-256：见 Release 内的 `OPods-v3.4.27-arm64-v8a.sha256`
+- SHA-256：`B05ABCC231E0D76B7A5A428463B98A364A59322AFDD9F457F12D6C3B3E00FB2C`
+- 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书
 
