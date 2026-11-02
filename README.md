@@ -5,12 +5,12 @@
 
 ## 当前版本
 
-- 版本：`v3.4.26`（`versionCode 60`）
-- GitHub Release：[v3.4.26-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.26-arm64-v8a)
-- 发布 APK：`OPods-v3.4.26-arm64-v8a.apk`（由 GitHub Actions 构建）
-- SHA-256：`98082A92868F0B4694C1ABA18A2B9297487C881A1324EC9BEEBDBA9B9A06A81E`
+- 版本：`v3.4.27`（`versionCode 61`）
+- GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
+- 发布 APK：`OPods-v3.4.27-arm64-v8a.apk`（由 GitHub Actions 构建）
+- SHA-256：见 Release 内的 `OPods-v3.4.27-arm64-v8a.sha256`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
-- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测，已移除自建 BLE 扫描和主动重连
+- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE 和头部手势仍需对应真机验收。
 
@@ -111,10 +111,11 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器。
 
 ## 安装
 
-1. 从最新 Release 下载 `OPods-v3.4.26-arm64-v8a.apk`，或使用本地构建产物覆盖安装：`adb install -r <APK路径>`。
-2. 在 LSPosed 中启用模块，勾选两个作用域：`com.heytap.mydevices`、`com.android.bluetooth`。
-3. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
-4. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
+1. 从最新 Release 下载 `OPods-v3.4.27-arm64-v8a.apk`，或使用本地构建产物安装：`adb install -r <APK路径>`。
+2. 3.4.27 使用新的正式签名证书；从旧的 debug 签名 3.4.26 升级会因签名不一致失败，需要先卸载旧模块再安装。LSPosed 作用域由设备使用者重新确认。
+3. 在 LSPosed 中启用模块，勾选两个作用域：`com.heytap.mydevices`、`com.android.bluetooth`。
+4. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
+5. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
 
 LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完成；模块不会自动修改 LSPosed 配置。
 覆盖安装后如果模块没有重新生效，先在 LSPosed 中停用再启用，然后停止相关官方 App。
@@ -128,7 +129,7 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 自定义输出：
 
 ```powershell
-.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.26.apk
+.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.27.apk
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xml 的版本号并构建

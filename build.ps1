@@ -7,7 +7,7 @@ param(
     [string]$KeystorePassword = 'android',
     [string]$KeyAlias = 'androiddebugkey',
     [string]$KeyPassword = 'android',
-    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.26.apk'
+    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.27.apk'
 )
 
 $ErrorActionPreference = 'Stop'

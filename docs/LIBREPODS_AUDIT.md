@@ -1,4 +1,4 @@
-# LibrePods v1.0.4 → OPods 3.4.26 功能接入审计
+# LibrePods v1.0.4 → OPods 3.4.27 功能接入审计
 
 审计日期：2026-11-02
 
@@ -6,18 +6,18 @@
 - 上游：LibrePods-v1.0.4/android/app/src/main/java/me/kavishdevar/librepods
 - 模块：OPods/src/io/github/oppoairpods/popup
 - 目标：AirPods 5、AirPods Pro 3
-- 构建：dist/OPPO-AirPods-Enhanced-v3.4.26.apk，versionCode 60
+- 构建：dist/OPPO-AirPods-Enhanced-v3.4.27.apk，versionCode 61
 - SHA-256：B0ACF545B1EC935726689294C7D0A57D27C11396C0F10EF59EBFE28CA382A91E
 
 ## 结论
 
-3.4.26 在 3.4.19 已验收功能的基础上，补齐了逐控件协议/存储标注和独立的“关于”页，
+3.4.27 在 3.4.19 已验收功能的基础上，补齐了逐控件协议/存储标注和独立的“关于”页，
 并把关键 Hook 从单一混淆名改为“已知名优先、签名/类型回退”。3.4.19 已由 ADB 安装到
-一加 13 并完成 UI 冒烟验收；3.4.26 已安装，2026-11-02 22:00 通过一次官方 ACL/弹窗流程复测，且源码中已无自建 BLE 扫描或主动重连。
+一加 13 并完成 UI 冒烟验收；3.4.27 切换到新的 100 年正式 Release 证书，功能与 3.4.26 相同。
 
 Pro 3 的助听/PPE、ATT 读写和头部手势阈值仍需要对应真机验证。
 
-## 3.4.26 UI
+## 3.4.27 UI
 
 官方页只保留首屏四个噪声快捷按钮、官方噪声横条、自适应强度和“AirPods 增强”入口。
 入口内部是七页卡片式 Dialog：
@@ -86,7 +86,7 @@ xposed/scope.list 只声明两个作用域：
 
 ## 构建与验收
 
-APK：dist/OPPO-AirPods-Enhanced-v3.4.26.apk
+APK：dist/OPPO-AirPods-Enhanced-v3.4.27.apk
 
 SHA-256：B0ACF545B1EC935726689294C7D0A57D27C11396C0F10EF59EBFE28CA382A91E
 
