@@ -6,10 +6,11 @@
 ## 当前版本
 
 - 版本：`v3.4.26`（`versionCode 60`）
-- APK：`dist/OPPO-AirPods-Enhanced-v3.4.26.apk`
-- SHA-256：`B0ACF545B1EC935726689294C7D0A57D27C11396C0F10EF59EBFE28CA382A91E`
+- GitHub Release：[v3.4.26-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.26-arm64-v8a)
+- 发布 APK：`OPods-v3.4.26-arm64-v8a.apk`（由 GitHub Actions 构建）
+- SHA-256：`98082A92868F0B4694C1ABA18A2B9297487C881A1324EC9BEEBDBA9B9A06A81E`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
-- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已安装并通过一次官方 ACL/弹窗流程复测，已移除自建 BLE 扫描和主动重连
+- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测，已移除自建 BLE 扫描和主动重连
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE 和头部手势仍需对应真机验收。
 
@@ -59,7 +60,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 | 包名 | 用途 | Hook 的入口 |
 | --- | --- | --- |
-| `com.heytap.mydevices` | 官方 AirPods 弹窗、详情页、设置页、AACP/ATT、自动连接 | `AirpodsSettingPreferencesFragment`、`AirpodsSettingActivity`、`AirpodsDetailPanelFragment`、`AirpodsManager` 接收器、`AirpodsScanHelper`、PTC 策略、`AirpodsBluetoothManager` 假断开过滤 |
+| `com.heytap.mydevices` | 官方 AirPods 弹窗、详情页、设置页、AACP/ATT、官方连接回调 | `AirpodsSettingPreferencesFragment`、`AirpodsSettingActivity`、`AirpodsDetailPanelFragment`、`AirpodsManager` 接收器、`AirpodsScanHelper`/PTC listener、`FusionServiceImpl.handleEvents`、`AirpodsBluetoothManager` 假断开过滤 |
 | `com.android.bluetooth` | 只拦截 ColorOS 连接时发送的 `DISABLE_OFF` 帧 | `BluetoothSocket.getOutputStream`，只匹配精确 11 字节 `04 00 04 00 09 00 34 02 00 00 00` |
 
 不再 Hook：
@@ -74,6 +75,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 - Bluetooth 进程只过滤一个精确帧，其他 socket 写入原样放行。
 - MyDevices 中的 Hook 各自独立 try/catch；一个 Hook 失败不会让模块整体崩溃。
 - 可选装饰 Hook（自适应滑杆样式）失败时，功能仍由 AACP/Dashboard 控制。
+- 连接和弹窗只走官方 PTC/ACL 事件与 `AirpodsDiscoveryActivity`；模块不启动自建 BLE 扫描、主动重连 watchdog 或后台监听进程。
 - 不在第三方 App、桌面、通知中心或输入法里注入。
 
 ### OPPO 组件更新后的兼容策略
@@ -109,7 +111,7 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器。
 
 ## 安装
 
-1. 覆盖安装 APK：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.26.apk`。
+1. 从最新 Release 下载 `OPods-v3.4.26-arm64-v8a.apk`，或使用本地构建产物覆盖安装：`adb install -r <APK路径>`。
 2. 在 LSPosed 中启用模块，勾选两个作用域：`com.heytap.mydevices`、`com.android.bluetooth`。
 3. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
 4. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
@@ -130,8 +132,12 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xml 的版本号并构建
-`OPods-v<version>-arm64-v8a.apk`。发布标签需要配置仓库 Secrets 中的 keystore 和 alias/password；
-没有 Secrets 时只生成 CI 调试签名，不能覆盖本地固定签名版本。
+`OPods-v<version>-arm64-v8a.apk`。
+
+- Push `main`：上传 Actions artifact，不创建 Release。
+- Push `v<version>-arm64-v8a` 标签：构建并创建 GitHub Release，附带 APK 和 `.sha256`。
+- 正式 Release 必须配置仓库 Secrets 中的 `ANDROID_KEYSTORE_BASE64`、密码和 alias；缺少 Secrets 时只允许生成 CI 调试签名 artifact，tag 发布会被拒绝。
+- 当前 APK 由 Workflow 产物发布，不需要把生成 APK 提交到源码树。
 
 ## 诊断
 
