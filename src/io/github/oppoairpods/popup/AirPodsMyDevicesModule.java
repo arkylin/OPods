@@ -457,7 +457,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             try {
                 Method onNoise = activity.getDeclaredMethod("onNoiseControlClick", int.class);
                 hook(onNoise).intercept(chain -> {
-                    Object result = chain.proceed();
                     int mode = (int) chain.getArg(0);
                     try {
                         if (mode >= 1 && mode <= 4) {
@@ -469,10 +468,11 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                             }
                             call(chain.getThisObject(), "updateCurrentFeature",
                                     new Class<?>[]{int.class}, new Object[]{mode});
+                            return null;
                         }
                     } catch (Throwable ignored) {
                     }
-                    return result;
+                    return chain.proceed();
                 });
             } catch (Throwable error) {
                 Logx.w("noise click hook failed", error);
@@ -483,20 +483,23 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         false, loader);
                 Method setFeature = viewModel.getDeclaredMethod("setExtendFeatureStatus", int.class, int.class);
                 hook(setFeature).intercept(chain -> {
-                    Object result = chain.proceed();
-                    try {
-                        int type = (int) chain.getArg(0);
-                        int value = (int) chain.getArg(1);
-                        if (type == 4) {
-                            Context context = appContext != null ? appContext : currentApplication();
-                            if (context != null) {
-                                AirPodsController.get(context).sendControl(AacpProtocol.CONTROL_LISTENING_MODE, value);
-                            }
+                    int type = (int) chain.getArg(0);
+                    int value = (int) chain.getArg(1);
+                    if (type == 4) {
+                        Context context = appContext != null ? appContext : currentApplication();
+                        if (context != null) {
+                            AirPodsController controller = AirPodsController.get(context);
+                            controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, value);
+                            controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, value);
                         }
+                        return true;
+                    }
+                    try {
+                        return chain.proceed();
                     } catch (Throwable error) {
                         Logx.w("AACP noise fallback failed", error);
+                        return false;
                     }
-                    return result;
                 });
             } catch (Throwable error) {
                 Logx.w("view model noise hook failed", error);

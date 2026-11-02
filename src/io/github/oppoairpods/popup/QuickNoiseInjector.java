@@ -167,7 +167,6 @@ final class QuickNoiseInjector {
             lastMode = mode;
             controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
             controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
-            NativeAirPodsControl.setStatus(device, NativeAirPodsControl.FEATURE_NOISE, mode);
             Logx.i("quick noise mode=" + mode);
         }
 

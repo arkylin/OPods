@@ -25,6 +25,12 @@ final class FeatureSupportEnabler {
             Object selector = call(activity, "getNoiseSelector");
             if (selector != null) {
                 selector.getClass().getMethod("setVisibility", int.class).invoke(selector, 0);
+                for (Method method : selector.getClass().getMethods()) {
+                    if ("setSelectionGuard".equals(method.getName()) && method.getParameterCount() == 1) {
+                        method.invoke(selector, new Object[]{null});
+                        break;
+                    }
+                }
                 Logx.i("official noise selector shown");
             }
             call(activity, "updateNoiseSelectorItems");

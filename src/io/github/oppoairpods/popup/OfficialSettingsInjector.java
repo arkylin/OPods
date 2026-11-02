@@ -248,15 +248,33 @@ final class OfficialSettingsInjector {
             add(screen, category);
             Object slider = addSlider(category, "adaptive_strength_slider", "自适应降噪强度",
                     "", 100, getter, setter);
+            final boolean[] lastVisible = new boolean[]{true};
             refreshers.add(() -> {
                 try {
                     boolean adaptive = controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1) == 4;
                     invoke(category, "P0", new Class<?>[]{boolean.class}, new Object[]{adaptive});
                     invoke(slider, "P0", new Class<?>[]{boolean.class}, new Object[]{adaptive});
+                    if (adaptive != lastVisible[0]) {
+                        lastVisible[0] = adaptive;
+                        main.post(this::forceListRefresh);
+                    }
                 } catch (Throwable error) {
                     Logx.w("adaptive slider visibility failed", error);
                 }
             });
+        }
+
+        private void forceListRefresh() {
+            try {
+                Object list = call(fragment.get(), "getListView");
+                if (list == null) return;
+                Object adapter = list.getClass().getMethod("getAdapter").invoke(list);
+                if (adapter != null) {
+                    adapter.getClass().getMethod("notifyDataSetChanged").invoke(adapter);
+                }
+            } catch (Throwable error) {
+                Logx.w("adaptive slider list refresh failed", error);
+            }
         }
 
         private void addEq(Object group) throws Exception {
