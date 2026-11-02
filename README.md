@@ -54,20 +54,60 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 `关于`页有完整图例，且每个控件下方都有对应的协议/存储标注。
 
-## Hook 范围：只保留两个进程
+## Hook 范围：两个进程，22 个 Hook 点
 
-`xposed/scope.list` 只声明：
+`xposed/scope.list` 只声明两个包，所有增强逻辑都通过 LibXposed 的
+`module.hook(...).intercept(...)` 在官方进程内完成，不使用 `XposedBridge` 直接 Hook，
+也不在第三方 App、Launcher、SystemUI 或 Settings 中注入。
 
-| 包名 | 用途 | Hook 的入口 |
-| --- | --- | --- |
-| `com.heytap.mydevices` | 官方 AirPods 弹窗、详情页、设置页、AACP/ATT、官方连接回调 | `AirpodsSettingPreferencesFragment`、`AirpodsSettingActivity`、`AirpodsDetailPanelFragment`、`AirpodsManager` 接收器、`AirpodsScanHelper`/PTC listener、`FusionServiceImpl.handleEvents`、`AirpodsBluetoothManager` 假断开过滤 |
-| `com.android.bluetooth` | 只拦截 ColorOS 连接时发送的 `DISABLE_OFF` 帧 | `BluetoothSocket.getOutputStream`，只匹配精确 11 字节 `04 00 04 00 09 00 34 02 00 00 00` |
+| 进程 | Hook 点数 | 职责 |
+| --- | ---: | --- |
+| `com.heytap.mydevices` | 21 | 官方 AirPods 弹窗、扫描/PTC、详情页、设置页、AACP/ATT 与假断开过滤 |
+| `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
-不再 Hook：
+> 计数口径是源码中的 `hook(...)` 调用点。`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，
+> 因此运行时实际 Hook 的构造器数量可能多于 1；`AirpodsScanHelper.registerPtc()` 仅观察官方注册结果，
+> 不改变官方流程。
 
-- `com.heytap.accessory`：不再作为作用域；Off 帧过滤只保留在 `com.android.bluetooth`，避免多进程重复 Hook。
+### `com.heytap.mydevices`：21 个 Hook 点
+
+| # | 目标类 / 方法 | 作用 |
+| ---: | --- | --- |
+| 1 | `DeviceApplication.onCreate()` | 记录官方进程的 `Application` 上下文，供后续 UI 与控制器使用。 |
+| 2 | `ScanFilter$Builder.setManufacturerData(int, byte[], byte[])` | 当厂商 ID 为 Apple `0x004C` 且数据以 `07 19` / `07 0F` 开头时，放宽为 `07 xx` + 2 字节掩码，让新 AirPods 通过 ROM 写死的扫描过滤。 |
+| 3 | `AirpodsScanHelper.registerPtc()` | 调用官方实现后读取 `mIsPtcRegistered`，只用于确认官方 PTC 注册结果。 |
+| 4 | `aa.b2$a.r()`（回退 `aa.AbstractC0958b2$a`） | 强制返回 `true`，开启官方 AirPods 特性支持。 |
+| 5 | `aa.b2$a.J(int)`（按签名回退） | 把能力位与 `0x200` 合并，启用官方 UI 的 Off 模式能力。 |
+| 6 | `AirpodsScanPolicy` 所有参数数不少于 5 的构造器 | 构造完成后查找带 `registerPtc` 的管理器字段并补调一次，作为官方 PTC 注册回退。 |
+| 7 | `AirpodsManager$c.onReceive(Context, Intent)` | 官方广播处理后接收 `ACL_CONNECTED` / `ACL_DISCONNECTED`，同步给 `AirPodsController`。 |
+| 8 | `AirpodsScanHelper$registerPtc$2$a.onServiceFound(...)` | 把官方 PTC 扫描到的 service node 交给模块解析，用于弹窗、电量与盒盖状态。 |
+| 9 | `FusionServiceImpl.handleEvents(...)` | 对 `onServiceFound` 事件解析 `ServiceNodeParams` 并转换为 `ServiceNode`，走与 PTC 回调相同的处理路径。 |
+| 10 | `AirpodsSettingPreferencesFragment.onCreatePreferences(Bundle, String)` | 官方设置页构建完成后注入 COUI 偏好条目。 |
+| 11 | `AirpodsDetailPanelFragment.bindPanelBodyViews(View)` | 详情页绑定后安装首屏噪声快捷选择器。 |
+| 12 | `AirpodsDetailPanelFragment.initView(View)` | 详情页初始化时再次尝试安装；`WeakHashMap` 保证同一 Fragment 不会重复注入。 |
+| 13 | `AirpodsDetailPanelFragment.clearPanelBodyViewRefs()` | 清理视图前释放模块持有的快捷选择器状态与监听。 |
+| 14 | `androidx.preference.SeekBarPreference` 的单参数 `void` 绑定方法（优先 `Z`，失败按签名回退） | 仅装饰 `SliderRegistry` 标记的模块滑杆，补刻度、轨道与 COUI 卡片样式；Hook 失败不影响滑杆本身的 AACP 控制。 |
+| 15 | `AirpodsSettingActivity.updateFeatureSupport(int)` | 官方刷新后强制展开噪声选择器、空间音频/佩戴检测/对话分组，并设置佩戴检查支持。 |
+| 16 | `AirpodsSettingActivity.onResume()` | 从官方 ViewModel 读取当前 `BluetoothDevice` 并交给控制器，标记设置页已打开。 |
+| 17 | `AirpodsSettingActivity.onDestroy()` | 标记设置页关闭并清理控制器中的页面状态。 |
+| 18 | `AirpodsSettingActivity.onNoiseControlClick(int)` | 模式 1–4 直接写入 AACP 并更新官方 UI，不再依赖 AirPods 走不通的官方噪声下发路径。 |
+| 19 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 当类型为 `4`（噪声控制）时改走 AACP 设置聆听模式；其他类型继续官方实现。 |
+| 20 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
+| 21 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
+
+### `com.android.bluetooth`：1 个 Hook 点
+
+| 目标类 / 方法 | 作用 |
+| --- | --- |
+| `BluetoothSocket.getOutputStream()` | 用 `FilterOutputStream` 包装官方输出流，只丢弃完全匹配的 11 字节 `04 00 04 00 09 00 34 02 00 00 00`；其他 socket 写入一律原样透传。 |
+
+### 明确不 Hook
+
+- `AirpodsDiscoveryActivity` 本身不 Hook；弹窗仍由官方 PTC/ACL 流程触发并复用官方 Activity。
+- `com.heytap.accessory`：不作为作用域，Off 帧过滤只保留在 `com.android.bluetooth`，避免多进程重复 Hook。
 - `com.oplus.wirelesssettings`：旧版“蓝牙设置 → 耳机功能”实验路径已删除，当前只使用 MyDevices 官方页。
-- `com.oplus.melody`、Launcher、SystemUI、Settings：不 Hook。
+- `com.oplus.melody`、Launcher、SystemUI、Settings 和第三方 App：不 Hook。
+- 模块不创建自建 BLE 扫描、主动重连 watchdog、后台监听 Service 或独立连接路径。
 
 ### 为什么算最小 Hook
 
