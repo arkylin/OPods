@@ -18,6 +18,7 @@ concurrency:
 
 env:
   ANDROID_PLATFORM: '37.2'
+  BUILD_TOOLS_VERSION: '37.0.0'
   ABI_LABEL: 'arm64-v8a'
 
 jobs:
@@ -42,7 +43,7 @@ jobs:
         shell: bash
         run: |
           yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install platforms\;android-${ANDROID_PLATFORM}
+          sdkmanager --install "platforms;android-${ANDROID_PLATFORM}" "build-tools;${BUILD_TOOLS_VERSION}"
 
       - name: Read version from manifest
         shell: pwsh
@@ -62,11 +63,16 @@ jobs:
         run: |
           if ($env:ANDROID_KEYSTORE_BASE64) {
             $bytes = [Convert]::FromBase64String($env:ANDROID_KEYSTORE_BASE64)
-            [IO.File]::WriteAllBytes((Join-Path $PWD 'ci-signing.jks'), $bytes)
-            'SIGNING_KEYSTORE=ci-signing.jks' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $keystore = Join-Path $env:RUNNER_TEMP 'ci-signing.jks'
+            [IO.File]::WriteAllBytes($keystore, $bytes)
+            ('SIGNING_KEYSTORE=' + $keystore) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             'SIGNING_MODE=secrets' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
-            'SIGNING_KEYSTORE=.keystore/ci-debug.keystore' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            $keystore = Join-Path $env:RUNNER_TEMP 'ci-debug.keystore'
+            keytool -genkeypair -noprompt -keystore $keystore -storepass android -keypass android `
+              -alias androiddebugkey -dname 'CN=Android Debug,O=Android,C=US' `
+              -keyalg RSA -keysize 2048 -validity 10000 -storetype PKCS12
+            ('SIGNING_KEYSTORE=' + $keystore) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             'SIGNING_MODE=ci-debug' | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             Write-Output '::warning title=CI debug signature::Configure signing secrets for installable upgrades and tagged releases.'
           }
@@ -84,6 +90,7 @@ jobs:
           $output = Join-Path 'dist' ($env:ARTIFACT_NAME + '.apk')
           ./build.ps1 `
             -CompileSdk $env:ANDROID_PLATFORM `
+            -BuildToolsVersion $env:BUILD_TOOLS_VERSION `
             -Keystore $env:SIGNING_KEYSTORE `
             -KeystorePassword $keystorePassword `
             -KeyAlias $keyAlias `
