@@ -188,6 +188,11 @@ final class AirPodsController implements AacpSession.Listener {
         return value != null && value.length > 0 ? value[0] : fallback;
     }
 
+    void setControlState(int id, int... values) {
+        controls.put(id, values.clone());
+        notifyChanged();
+    }
+
     String batterySummary() {
         if (left < 0 && right < 0 && caseLevel < 0) return "正在读取电量";
         StringBuilder builder = new StringBuilder();

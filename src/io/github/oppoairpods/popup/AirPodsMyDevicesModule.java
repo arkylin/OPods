@@ -462,7 +462,11 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     try {
                         if (mode >= 1 && mode <= 4) {
                             Context context = appContext != null ? appContext : currentApplication();
-                            if (context != null) AirPodsController.get(context).sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+                            if (context != null) {
+                                AirPodsController controller = AirPodsController.get(context);
+                                controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+                                controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+                            }
                             call(chain.getThisObject(), "updateCurrentFeature",
                                     new Class<?>[]{int.class}, new Object[]{mode});
                         }
