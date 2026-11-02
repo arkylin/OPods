@@ -81,65 +81,13 @@ final class OfficialSettingsInjector {
 
             try {
                 addAdaptiveSlider(screen,
-                        () -> controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
-                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
+                        () -> 100 - controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
+                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 100 - value));
             } catch (Throwable error) {
-                Logx.w("adaptive slider unavailable, falling back to list", error);
-                addList(sound, "adaptive_strength", "自适应降噪强度",
-                        new String[]{"0", "20", "40", "60", "80", "100"},
-                        new String[]{"0", "20", "40", "60", "80", "100"},
-                        () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50)),
-                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, Integer.parseInt(value)));
+                Logx.w("adaptive slider unavailable", error);
             }
 
-            addSwitch(settings, "auto_connect", "自动连接", "开盖后自动连接并显示官方弹窗",
-                    controller::autoConnect, controller::setAutoConnect);
-            addSwitch(settings, "ear_playback", "入耳自动播放", "戴上播放，取下暂停",
-                    controller::earPlayback, controller::setEarPlayback);
-            addSwitch(settings, "battery_alerts", "低电量提醒", "电量低于 20% 时通知",
-                    controller::batteryAlerts, controller::setBatteryAlerts);
-            addSwitch(settings, "adaptive_volume", "自适应音量", "根据环境自动调整媒体音量",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_ADAPTIVE_VOLUME),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_VOLUME, value ? 1 : 2));
-            addSwitch(settings, "single_ear", "单耳降噪", "只戴一只耳机时仍启用降噪",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_SINGLE_EAR_ANC),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_SINGLE_EAR_ANC, value ? 1 : 2));
-            addSwitch(settings, "volume_swipe", "音量滑动", "在耳机柄上滑动调节音量",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_VOLUME_SWIPE),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_VOLUME_SWIPE, value ? 1 : 2));
-            addSwitch(settings, "sleep", "睡眠检测", "检测到入睡后暂停播放",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_SLEEP_DETECTION),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_SLEEP_DETECTION, value ? 1 : 2));
-            addSwitch(settings, "charging", "优化充电", "减缓充电以延长电池寿命",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_OPTIMIZED_CHARGING),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_OPTIMIZED_CHARGING, value ? 1 : 2));
-            addSwitch(settings, "allow_off", "允许关闭聆听模式", "保留噪声控制里的“关闭”选项",
-                    () -> controller.controlOn(AacpProtocol.CONTROL_ALLOW_OFF),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_ALLOW_OFF, value ? 1 : 2));
-
-            addList(settings, "microphone", "麦克风", new String[]{"自动", "始终右耳", "始终左耳"},
-                    new String[]{"0", "1", "2"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_MICROPHONE, 0)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_MICROPHONE, Integer.parseInt(value)));
-            addList(settings, "press_speed", "按压速度", new String[]{"默认", "慢", "最慢"},
-                    new String[]{"0", "1", "2"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_PRESS_SPEED, 0)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_PRESS_SPEED, Integer.parseInt(value)));
-            addList(settings, "press_hold", "长按时长", new String[]{"默认", "较短", "最短"},
-                    new String[]{"0", "1", "2"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_PRESS_HOLD, 0)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_PRESS_HOLD, Integer.parseInt(value)));
-            addList(settings, "swipe_time", "音量滑动时长", new String[]{"默认", "较长", "最长"},
-                    new String[]{"0", "1", "2"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_VOLUME_SWIPE_DURATION, 0)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_VOLUME_SWIPE_DURATION, Integer.parseInt(value)));
-            addList(settings, "tone", "提示音音量",
-                    new String[]{"15", "25", "35", "50", "65", "80", "100"},
-                    new String[]{"15", "25", "35", "50", "65", "80", "100"},
-                    () -> String.valueOf(controller.controlValue(AacpProtocol.CONTROL_TONE_VOLUME, 50)),
-                    value -> controller.sendControl(AacpProtocol.CONTROL_TONE_VOLUME, Integer.parseInt(value)));
-            addEq(settings);
-            addInfo(settings);
+            addDashboard(settings);
 
             refresh = () -> {
                 for (Runnable runnable : refreshers) {
@@ -164,6 +112,23 @@ final class OfficialSettingsInjector {
             } catch (Throwable ignored) {
             }
             return controller.findBondedAirPods();
+        }
+
+        private void addDashboard(Object group) throws Exception {
+            Object preference = newPreference("com.coui.appcompat.preference.COUIJumpPreference",
+                    new Class<?>[]{Context.class}, new Object[]{context});
+            set(preference, "setKey", "oppo_airpods_dashboard");
+            set(preference, "setTitle", "AirPods 增强");
+            set(preference, "setPersistent", false);
+            setClickListener(preference, () -> {
+                AirPodsDashboard.show(context, controller);
+                return true;
+            });
+            add(group, preference);
+            refreshers.add(() -> {
+                String model = controller.modelName();
+                set(preference, "setSummary", model + " · 音频、操控、连接、听力与设备信息");
+            });
         }
 
         private void addSwitch(Object group, String key, String title, String summary,
@@ -228,6 +193,7 @@ final class OfficialSettingsInjector {
                 if (!summary.isEmpty()) set(preference, "setSummary", summary + " · " + progress);
                 return true;
             });
+            SliderRegistry.register(preference);
             add(group, preference);
             refreshers.add(() -> {
                 try {

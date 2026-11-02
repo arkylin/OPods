@@ -69,6 +69,18 @@ final class AacpSession {
         return write(AacpProtocol.equalizer(enabled, low, mid, high));
     }
 
+    boolean sendRename(String name) {
+        return write(AacpProtocol.rename(name));
+    }
+
+    boolean sendHeadTracking(boolean start, boolean alternate) {
+        return write(AacpProtocol.headTracking(start, alternate));
+    }
+
+    boolean sendPacket(byte[] packet) {
+        return write(packet);
+    }
+
     boolean write(byte[] packet) {
         BluetoothSocket channel = socket;
         if (channel == null) return false;
@@ -120,7 +132,7 @@ final class AacpSession {
             Thread.sleep(1200L);
             return;
         }
-        BluetoothSocket channel = createSocket(adapter, device);
+        BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
         socket = channel;
         Thread watchdog = new Thread(() -> {
             try {
@@ -158,7 +170,13 @@ final class AacpSession {
         while (running.get()) {
             int count = input.read(buffer);
             if (count <= 0) throw new IOException("AACP stream ended");
-            List<byte[]> packets = framer.feed(java.util.Arrays.copyOf(buffer, count));
+            byte[] raw = java.util.Arrays.copyOf(buffer, count);
+            if (AacpProtocol.isHeadTracking(raw)) {
+                AacpProtocol.Event head = AacpProtocol.parse(raw);
+                if (head != null) listener.onEvent(head);
+                continue;
+            }
+            List<byte[]> packets = framer.feed(raw);
             for (byte[] packet : packets) {
                 AacpProtocol.Event event = AacpProtocol.parse(packet);
                 if (event != null) listener.onEvent(event);
@@ -175,13 +193,13 @@ final class AacpSession {
         }
     }
 
-    private static BluetoothSocket createSocket(BluetoothAdapter adapter, BluetoothDevice device) throws Exception {
+    static BluetoothSocket createSocket(BluetoothAdapter adapter, BluetoothDevice device, int psm, ParcelUuid uuid) throws Exception {
         Object[][] attempts = new Object[][]{
-                {adapter, device, 3, true, true, AacpProtocol.PSM, AACP_PARCEL_UUID},
-                {device, 3, true, true, AacpProtocol.PSM, AACP_PARCEL_UUID},
-                {device, 3, 1, true, true, AacpProtocol.PSM, AACP_PARCEL_UUID},
-                {3, 1, true, true, device, AacpProtocol.PSM, AACP_PARCEL_UUID},
-                {3, true, true, device, AacpProtocol.PSM, AACP_PARCEL_UUID}
+                {adapter, device, 3, true, true, psm, uuid},
+                {device, 3, true, true, psm, uuid},
+                {device, 3, 1, true, true, psm, uuid},
+                {3, 1, true, true, device, psm, uuid},
+                {3, true, true, device, psm, uuid}
         };
         Throwable last = null;
         for (Object[] values : attempts) {

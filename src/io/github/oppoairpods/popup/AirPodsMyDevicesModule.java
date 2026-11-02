@@ -10,10 +10,13 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.RelativeLayout;
 import android.widget.SeekBar;
+import android.widget.TextView;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.function.Predicate;
 
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
@@ -25,14 +28,13 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
  */
 public final class AirPodsMyDevicesModule extends XposedModule {
     private static final String MYDEVICES = "com.heytap.mydevices";
-    private static final String WIRELESS = "com.oplus.wirelesssettings";
     private static final String BLUETOOTH = "com.android.bluetooth";
-    private static final String ACCESSORY = "com.heytap.accessory";
     private static final Object INSTALL_LOCK = new Object();
     private static boolean myDevicesHooksInstalled;
-    private static boolean wirelessHooksInstalled;
     private static boolean aapOffFilterInstalled;
     private static volatile Context appContext;
+    private static final java.util.concurrent.atomic.AtomicInteger PTC_LOGS =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -43,7 +45,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     public void onPackageLoaded(PackageLoadedParam param) {
         String pkg = param.getPackageName();
         ClassLoader loader = param.getDefaultClassLoader();
-        if (BLUETOOTH.equals(pkg) || ACCESSORY.equals(pkg)) {
+        if (BLUETOOTH.equals(pkg)) {
             installAapOff(loader);
             return;
         }
@@ -60,9 +62,12 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         HiddenApi.exemptBluetooth();
         appContext = currentApplication();
         hookApplication(loader);
+        hookAirPodsScanFilter(loader);
+        hookPtcRegistration(loader);
         hookAirPodsSupport(loader);
         hookOfficialPopup(loader);
         hookScanCallback(loader);
+        hookFusionEvents(loader);
         hookSettingsPage(loader);
         hookSettingsActivity(loader);
         hookAdaptiveSlider(loader);
@@ -77,77 +82,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             aapOffFilterInstalled = true;
         }
         AapOffFilter.install(this, loader);
-    }
-
-    private void installWirelessSettings(ClassLoader loader) {
-        synchronized (INSTALL_LOCK) {
-            if (wirelessHooksInstalled) return;
-            wirelessHooksInstalled = true;
-        }
-        try {
-            Class<?> feature = Class.forName("com.oplus.wirelesssettings.k", false, loader);
-            hookNoArg(feature, "D", true, "WirelessSettings AirPods feature");
-            try {
-                Class<?> cached = Class.forName("com.android.settingslib.bluetooth.CachedBluetoothDevice", false, loader);
-                for (Constructor<?> constructor : cached.getDeclaredConstructors()) {
-                    if (constructor.getParameterCount() != 3) continue;
-                    hook(constructor).intercept(chain -> {
-                        Object result = chain.proceed();
-                        try {
-                            Object value = chain.getArg(2);
-                            if (value instanceof BluetoothDevice) {
-                                BluetoothDevice device = (BluetoothDevice) value;
-                                String name = null;
-                                try { name = device.getAlias(); } catch (Throwable ignored) { }
-                                if (name == null || name.isEmpty()) name = device.getName();
-                                if (name != null && name.toLowerCase(java.util.Locale.ROOT).contains("airpods")) {
-                                    setAirPodsFlag(chain.getThisObject(), true);
-                                }
-                            }
-                        } catch (Throwable error) {
-                            Logx.w("CachedBluetoothDevice flag fix failed", error);
-                        }
-                        return result;
-                    });
-                }
-                Method support = cached.getDeclaredMethod("isTotallySupportAirPods", Context.class);
-                hook(support).intercept(chain -> {
-                    try {
-                        Object value = call(chain.getThisObject(), "getDevice");
-                        if (value instanceof BluetoothDevice) {
-                            BluetoothDevice device = (BluetoothDevice) value;
-                            String name = null;
-                            try { name = device.getAlias(); } catch (Throwable ignored) { }
-                            if (name == null || name.isEmpty()) name = device.getName();
-                            if (name != null && name.toLowerCase(java.util.Locale.ROOT).contains("airpods")) return true;
-                        }
-                    } catch (Throwable error) {
-                        Logx.w("AirPods support probe failed", error);
-                    }
-                    return chain.proceed();
-                });
-            } catch (Throwable error) {
-                Logx.w("CachedBluetoothDevice AirPods hook failed", error);
-            }
-            try {
-                Class<?> profile = Class.forName("com.oplus.wirelesssettings.bluetooth.B", false, loader);
-                Method onCreate = profile.getDeclaredMethod("onCreate", android.os.Bundle.class);
-                hook(onCreate).intercept(chain -> {
-                    Object result = chain.proceed();
-                    try {
-                        WirelessSettingsInjector.install(chain.getThisObject());
-                    } catch (Throwable error) {
-                        Logx.w("headphone function injection failed", error);
-                    }
-                    return result;
-                });
-                Logx.i("DeviceProfilesSettings hook installed");
-            } catch (Throwable error) {
-                Logx.w("DeviceProfilesSettings hook failed", error);
-            }
-        } catch (Throwable error) {
-            Logx.w("WirelessSettings feature hook failed", error);
-        }
     }
 
     private void hookApplication(ClassLoader loader) {
@@ -168,12 +102,74 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         }
     }
 
+    /**
+     * The ROM's PTC filter is pinned to AirPods 4 era proximity prefixes. Keep the
+     * manufacturer id and subtype, but let newer AirPods (for example AirPods 5)
+     * match by the first two bytes.
+     */
+    private void hookAirPodsScanFilter(ClassLoader loader) {
+        try {
+            Class<?> builder = Class.forName("android.bluetooth.le.ScanFilter$Builder", false, loader);
+            for (Method method : builder.getDeclaredMethods()) {
+                if (!"setManufacturerData".equals(method.getName())
+                        || method.getParameterCount() != 3
+                        || method.getParameterTypes()[0] != int.class
+                        || method.getParameterTypes()[1] != byte[].class) continue;
+                hook(method).intercept(chain -> {
+                    int manufacturer = (int) chain.getArg(0);
+                    Object raw = chain.getArg(1);
+                    if (manufacturer == 76 && raw instanceof byte[]) {
+                        byte[] data = (byte[]) raw;
+                        if (data.length >= 2 && data[0] == 7 && (data[1] == 25 || data[1] == 15)) {
+                            byte[] broadened = new byte[]{7, data[1]};
+                            byte[] mask = new byte[]{(byte) 0xFF, (byte) 0xFF};
+                            Logx.i("AirPods scan filter broadened for subtype " + (data[1] & 0xFF));
+                            return chain.proceed(new Object[]{manufacturer, broadened, mask});
+                        }
+                    }
+                    return chain.proceed();
+                });
+                Logx.i("AirPods scan filter hook installed");
+            }
+        } catch (Throwable error) {
+            Logx.w("AirPods scan filter hook failed", error);
+        }
+    }
+
+    private void hookPtcRegistration(ClassLoader loader) {
+        try {
+            Class<?> helper = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.core.AirpodsScanHelper", false, loader);
+            for (Method method : helper.getDeclaredMethods()) {
+                if (!"registerPtc".equals(method.getName()) || method.getParameterCount() != 0) continue;
+                hook(method).intercept(chain -> {
+                    Logx.i("official AirPods PTC registration requested");
+                    Object result = chain.proceed();
+                    try {
+                        Field registered = helper.getDeclaredField("mIsPtcRegistered");
+                        registered.setAccessible(true);
+                        Logx.i("official AirPods PTC registered=" + registered.getBoolean(chain.getThisObject()));
+                    } catch (Throwable error) {
+                        Logx.w("PTC registration state unavailable", error);
+                    }
+                    return result;
+                });
+                Logx.i("AirPods PTC registration hook installed");
+            }
+        } catch (Throwable error) {
+            Logx.w("AirPods PTC registration hook failed", error);
+        }
+    }
+
     private void hookAirPodsSupport(ClassLoader loader) {
         try {
-            Class<?> support = Class.forName("aa.b2$a", false, loader);
+            Class<?> support = findClass(loader, "aa.b2$a", "aa.AbstractC0958b2$a");
             hookNoArg(support, "r", true, "AirPods feature support");
             try {
-                Method mask = support.getDeclaredMethod("J", int.class);
+                Method mask = findMethod(support, "J",
+                        method -> method.getParameterCount() == 1
+                                && method.getParameterTypes()[0] == int.class
+                                && !Modifier.isStatic(method.getModifiers()));
                 hook(mask).intercept(chain -> {
                     int value = (int) chain.getArg(0);
                     return chain.proceed(new Object[]{value | 0x200});
@@ -192,8 +188,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 hook(constructor).intercept(chain -> {
                     Object result = chain.proceed();
                     try {
-                        Field managerField = policy.getDeclaredField("e");
-                        managerField.setAccessible(true);
+                        Field managerField = findFieldWithMethod(policy, "registerPtc");
                         Object manager = managerField.get(chain.getThisObject());
                         if (manager != null) manager.getClass().getMethod("registerPtc").invoke(manager);
                     } catch (Throwable error) {
@@ -246,8 +241,49 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 }
                 return chain.proceed();
             });
+            Logx.i("PTC listener hook installed");
         } catch (Throwable error) {
             Logx.w("PTC listener hook failed", error);
+        }
+    }
+
+    private void hookFusionEvents(ClassLoader loader) {
+        try {
+            Class<?> impl = Class.forName(
+                    "com.oplus.pantaconnect.sdk.discovery.fusion.FusionServiceImpl", false, loader);
+            Method handleEvents = null;
+            for (Method method : impl.getDeclaredMethods()) {
+                if ("handleEvents".equals(method.getName()) && method.getParameterCount() == 2) {
+                    handleEvents = method;
+                    break;
+                }
+            }
+            if (handleEvents == null) throw new NoSuchMethodException("FusionServiceImpl.handleEvents");
+            hook(handleEvents).intercept(chain -> {
+                try {
+                    Object event = chain.getArg(1);
+                    if (event != null) {
+                        String type = (String) event.getClass().getMethod("getType").invoke(event);
+                        if ("onServiceFound".equals(type)) {
+                            Object args = event.getClass().getMethod("getArgs").invoke(event);
+                            Class<?> params = Class.forName(
+                                    "com.oplus.pantaconnect.fusionservice.ServiceNodeParams", false, loader);
+                            Class<?> bytes = Class.forName("com.google.protobuf.ByteString", false, loader);
+                            Object parsed = params.getMethod("parseFrom", bytes).invoke(null, args);
+                            Class<?> nodeKt = Class.forName(
+                                    "com.oplus.pantaconnect.sdk.discovery.fusion.ServiceNodeKt", false, loader);
+                            Object node = nodeKt.getMethod("toServiceNode", params).invoke(null, parsed);
+                            handleServiceNode(node);
+                        }
+                    }
+                } catch (Throwable error) {
+                    Logx.w("PTC fusion event handling failed", error);
+                }
+                return chain.proceed();
+            });
+            Logx.i("PTC fusion event hook installed");
+        } catch (Throwable error) {
+            Logx.w("PTC fusion event hook failed", error);
         }
     }
 
@@ -312,21 +348,17 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         try {
             Class<?> seekPreference = Class.forName(
                     "androidx.preference.SeekBarPreference", false, loader);
-            Method bind = null;
-            for (Method method : seekPreference.getDeclaredMethods()) {
-                if ("Z".equals(method.getName()) && method.getParameterCount() == 1) {
-                    bind = method;
-                    break;
-                }
-            }
+            Method bind = findMethod(seekPreference, "Z",
+                    method -> method.getParameterCount() == 1
+                            && method.getReturnType() == void.class
+                            && !Modifier.isStatic(method.getModifiers()));
             if (bind == null) throw new NoSuchMethodException("SeekBarPreference.Z");
             hook(bind).intercept(chain -> {
                 Object result = chain.proceed();
                 try {
                     Object preference = chain.getThisObject();
-                    Object key = call(preference, "w");
-                    if ("oppo_airpods_adaptive_strength_slider".equals(key)) {
-                        Field field = seekPreference.getField("W");
+                    if (SliderRegistry.isOurs(preference)) {
+                        Field field = findField(seekPreference, SeekBar.class);
                         Object value = field.get(preference);
                         if (value instanceof SeekBar) {
                             SeekBar bar = (SeekBar) value;
@@ -367,8 +399,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                             }
 
                             View title = item.findViewById(android.R.id.title);
-                            Field valueField = seekPreference.getDeclaredField("X");
-                            valueField.setAccessible(true);
+                            Field valueField = findField(seekPreference, TextView.class);
                             Object valueView = valueField.get(preference);
                             if (title != null && valueView instanceof View
                                     && title.getParent() instanceof RelativeLayout
@@ -530,13 +561,38 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         if (info == null) return;
         Object raw = info.getClass().getMethod("getServiceData").invoke(info);
         if (!(raw instanceof byte[])) return;
-        AppleAdvertisement.LidInfo lid = AppleAdvertisement.parse((byte[]) raw);
-        if (lid == null || !lid.lidOpen) return;
+        byte[] data = (byte[]) raw;
+        int logIndex = PTC_LOGS.getAndIncrement();
+        if (logIndex < 20) {
+            Logx.i("PTC service data len=" + data.length + " hex=" + hexPrefix(data));
+        }
+        AppleAdvertisement.LidInfo lid = AppleAdvertisement.parse(data);
+        if (logIndex < 20 && lid == null) {
+            Logx.i("PTC service data not parsed as AirPods proximity");
+        }
+        if (lid == null || !lid.lidOpen) {
+            if (logIndex < 20 && lid != null) {
+                Logx.i("PTC service data parsed product=0x"
+                        + Integer.toHexString(lid.product) + " lidOpen=" + lid.lidOpen);
+            }
+            return;
+        }
         Context context = appContext != null ? appContext : currentApplication();
         if (context == null) return;
         AirPodsController controller = AirPodsController.get(context);
         BluetoothDevice device = controller.findBondedAirPods();
         controller.onCaseAdvertisement(device, lid.model, true);
+    }
+
+    private static String hexPrefix(byte[] data) {
+        StringBuilder value = new StringBuilder();
+        for (int i = 0; i < Math.min(24, data.length); i++) {
+            if (i > 0) value.append(' ');
+            String part = Integer.toHexString(data[i] & 0xFF).toUpperCase(java.util.Locale.ROOT);
+            if (part.length() == 1) value.append('0');
+            value.append(part);
+        }
+        return value.toString();
     }
 
     private void attachSettingsDevice(Object activity) throws Exception {
@@ -549,6 +605,56 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         controller.onSettingsPageOpened(device);
     }
 
+    private static Class<?> findClass(ClassLoader loader, String... names) throws ClassNotFoundException {
+        ClassNotFoundException last = null;
+        for (String name : names) {
+            try {
+                return Class.forName(name, false, loader);
+            } catch (ClassNotFoundException error) {
+                last = error;
+            }
+        }
+        throw last == null ? new ClassNotFoundException("no candidate") : last;
+    }
+
+    private static Method findMethod(Class<?> owner, String preferred, Predicate<Method> predicate)
+            throws NoSuchMethodException {
+        for (Method method : owner.getDeclaredMethods()) {
+            if (preferred.equals(method.getName()) && predicate.test(method)) return method;
+        }
+        for (Method method : owner.getDeclaredMethods()) {
+            if (predicate.test(method)) return method;
+        }
+        throw new NoSuchMethodException(owner.getName() + "." + preferred);
+    }
+
+    private static Field findField(Class<?> owner, Class<?> fieldType) throws NoSuchFieldException {
+        for (Class<?> type = owner; type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (field.getType() == fieldType && !Modifier.isStatic(field.getModifiers())) {
+                    field.setAccessible(true);
+                    return field;
+                }
+            }
+        }
+        throw new NoSuchFieldException(owner.getName() + " field of " + fieldType.getName());
+    }
+
+    private static Field findFieldWithMethod(Class<?> owner, String methodName) throws NoSuchFieldException {
+        for (Class<?> type = owner; type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (Modifier.isStatic(field.getModifiers())) continue;
+                try {
+                    field.getType().getMethod(methodName);
+                    field.setAccessible(true);
+                    return field;
+                } catch (NoSuchMethodException ignored) {
+                }
+            }
+        }
+        throw new NoSuchFieldException(owner.getName() + " field providing " + methodName);
+    }
+
     private void hookNoArg(Class<?> owner, String name, boolean result, String label) {
         try {
             Method method = owner.getDeclaredMethod(name);
@@ -556,20 +662,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             Logx.i(label + " forced true");
         } catch (Throwable error) {
             Logx.w(label + " hook failed", error);
-        }
-    }
-
-    private static void setAirPodsFlag(Object target, boolean value) {
-        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
-            try {
-                Field field = type.getDeclaredField("mIsAirPods");
-                field.setAccessible(true);
-                field.setBoolean(target, value);
-                return;
-            } catch (NoSuchFieldException ignored) {
-            } catch (Throwable ignored) {
-                return;
-            }
         }
     }
 

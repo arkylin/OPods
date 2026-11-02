@@ -14,7 +14,10 @@ final class AacpProtocol {
     static final int OP_BATTERY = 0x04;
     static final int OP_EAR_DETECTION = 0x06;
     static final int OP_CONTROL = 0x09;
+    static final int OP_HEAD_TRACKING = 0x17;
+    static final int OP_STEM_PRESS = 0x19;
     static final int OP_INFORMATION = 0x1D;
+    static final int OP_CONVERSATION = 0x4B;
     static final int OP_EQUALIZER = 0x63;
 
     static final int CONTROL_LISTENING_MODE = 0x0D;
@@ -32,9 +35,17 @@ final class AacpProtocol {
     static final int CONTROL_TONE_VOLUME = 0x1F;
     static final int CONTROL_SLEEP_DETECTION = 0x35;
     static final int CONTROL_OPTIMIZED_CHARGING = 0x3B;
+    static final int CONTROL_LISTENING_MODES = 0x1A;
+    static final int CONTROL_AUTO_ANSWER = 0x1E;
+    static final int CONTROL_AUTOMATIC_CONNECTION = 0x20;
     static final int CONTROL_CALL_MANAGEMENT = 0x24;
     static final int CONTROL_HEARING_AID = 0x2C;
     static final int CONTROL_HEARING_ASSIST = 0x33;
+    static final int CONTROL_HPS_GAIN_SWIPE = 0x2F;
+    static final int CONTROL_PPE_TOGGLE = 0x37;
+    static final int CONTROL_PPE_CAP_LEVEL = 0x38;
+    static final int CONTROL_STEM_CONFIG = 0x39;
+    static final int CONTROL_ALLOW_AUTO_CONNECT = 0x36;
 
     private AacpProtocol() {}
 
@@ -64,6 +75,42 @@ final class AacpProtocol {
                 (byte) clamp(low), (byte) clamp(mid), (byte) clamp(high)});
     }
 
+    static byte[] rename(String name) {
+        byte[] bytes = (name == null ? "" : name).getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 64) bytes = Arrays.copyOf(bytes, 64);
+        byte[] packet = new byte[9 + bytes.length];
+        System.arraycopy(HEADER, 0, packet, 0, 4);
+        packet[4] = 0x1A;
+        packet[5] = 0;
+        packet[6] = 1;
+        packet[7] = (byte) bytes.length;
+        packet[8] = 0;
+        System.arraycopy(bytes, 0, packet, 9, bytes.length);
+        return packet;
+    }
+
+    static byte[] headTracking(boolean start, boolean alternate) {
+        byte[] body;
+        if (start && alternate) {
+            body = new byte[]{0x17, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0F, 0x00, 0x08,
+                    0x73, 0x42, 0x0B, 0x08, 0x10, 0x10, 0x02, 0x1A, 0x05, 0x01,
+                    0x40, (byte) 0x9C, 0x00, 0x00};
+        } else if (start) {
+            body = new byte[]{0x17, 0x00, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x08,
+                    (byte) 0xA1, 0x02, 0x42, 0x0B, 0x08, 0x0E, 0x10, 0x02, 0x1A,
+                    0x05, 0x01, 0x40, (byte) 0x9C, 0x00, 0x00};
+        } else if (alternate) {
+            body = new byte[]{0x17, 0x00, 0x00, 0x00, 0x10, 0x00, 0x0F, 0x00, 0x08,
+                    0x75, 0x42, 0x0B, 0x08, 0x10, 0x10, 0x02, 0x1A, 0x05, 0x01,
+                    0x00, 0x00, 0x00, 0x00};
+        } else {
+            body = new byte[]{0x17, 0x00, 0x00, 0x00, 0x10, 0x00, 0x11, 0x00, 0x08,
+                    0x7E, 0x10, 0x02, 0x42, 0x0B, 0x08, 0x4E, 0x10, 0x02, 0x1A,
+                    0x05, 0x01, 0x00, 0x00, 0x00, 0x00};
+        }
+        return concat(HEADER, body);
+    }
+
     private static int clamp(int value) {
         return Math.max(0, Math.min(100, value));
     }
@@ -81,6 +128,8 @@ final class AacpProtocol {
         static final int TYPE_INFO = 4;
         static final int TYPE_EQUALIZER = 5;
         static final int TYPE_CONVERSATION = 6;
+        static final int TYPE_HEAD_TRACKING = 7;
+        static final int TYPE_STEM_PRESS = 8;
 
         final int type;
         int left = -1;
@@ -100,6 +149,18 @@ final class AacpProtocol {
         int eqHigh;
         int conversationSubtype;
         int conversationStatus;
+        String manufacturer = "";
+        String serialNumber = "";
+        String leftSerialNumber = "";
+        String rightSerialNumber = "";
+        String version1 = "";
+        String version2 = "";
+        String version3 = "";
+        String hardwareRevision = "";
+        String updaterIdentifier = "";
+        int stemPressType = -1;
+        int stemPressBud = -1;
+        byte[] raw = new byte[0];
 
         Event(int type) {
             this.type = type;
@@ -129,6 +190,17 @@ final class AacpProtocol {
                 return wear;
             case OP_INFORMATION:
                 return parseInformation(packet);
+            case OP_STEM_PRESS:
+                if (packet.length < 8) return null;
+                Event stem = new Event(Event.TYPE_STEM_PRESS);
+                stem.stemPressType = u(packet, 6);
+                stem.stemPressBud = u(packet, 7);
+                return stem;
+            case OP_HEAD_TRACKING:
+                if (packet.length < 55) return null;
+                Event head = new Event(Event.TYPE_HEAD_TRACKING);
+                head.raw = packet;
+                return head;
             case OP_EQUALIZER:
                 if (packet.length < 13 || u(packet, 6) != 5 || u(packet, 7) != 0) return null;
                 Event eq = new Event(Event.TYPE_EQUALIZER);
@@ -186,6 +258,15 @@ final class AacpProtocol {
         event.name = modelIndex > 0 && !fields[modelIndex - 1].trim().isEmpty()
                 ? fields[modelIndex - 1].trim() : "AirPods";
         event.modelNumber = fields[modelIndex].trim();
+        event.manufacturer = field(fields, modelIndex + 1);
+        event.serialNumber = field(fields, modelIndex + 2);
+        event.version1 = field(fields, modelIndex + 3);
+        event.version2 = field(fields, modelIndex + 4);
+        event.hardwareRevision = field(fields, modelIndex + 5);
+        event.updaterIdentifier = field(fields, modelIndex + 6);
+        event.leftSerialNumber = field(fields, modelIndex + 7);
+        event.rightSerialNumber = field(fields, modelIndex + 8);
+        event.version3 = field(fields, modelIndex + 9);
         for (int i = modelIndex + 1; i < fields.length; i++) {
             String value = fields[i].trim();
             if (value.matches("[0-9]+[A-Z][0-9]+[a-zA-Z]?")) {
@@ -194,6 +275,16 @@ final class AacpProtocol {
             }
         }
         return event;
+    }
+
+    private static String field(String[] fields, int index) {
+        return index >= 0 && index < fields.length ? fields[index].trim() : "";
+    }
+
+    static boolean isHeadTracking(byte[] data) {
+        if (data == null || data.length < 60 || !startsWith(data, HEADER)) return false;
+        if (u(data, 4) != OP_HEAD_TRACKING) return false;
+        return data.length > 10 && (u(data, 10) == 0x44 || u(data, 10) == 0x45);
     }
 
     private static boolean startsWith(byte[] data, byte[] prefix) {
@@ -258,6 +349,8 @@ final class AacpProtocol {
                 case OP_CONTROL:
                     return 11;
                 case OP_EAR_DETECTION:
+                    return 8;
+                case OP_STEM_PRESS:
                     return 8;
                 case OP_EQUALIZER:
                     return 13;

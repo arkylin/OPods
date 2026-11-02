@@ -11,29 +11,27 @@
 
 ## 进程与作用域
 
-`META-INF/xposed/scope.list` 只声明三个包：
+`META-INF/xposed/scope.list` 只声明两个包：
 
 | 包名 | 作用 |
 | --- | --- |
 | `com.heytap.mydevices` | 官方弹窗、扫描回调、设置页、AACP 控制通道和状态缓存 |
 | `com.android.bluetooth` | 过滤 ColorOS 写入 AirPods 的 `DISABLE_OFF` 帧 |
-| `com.heytap.accessory` | 同一 `DISABLE_OFF` 过滤的另一潜在写入进程 |
 
 `META-INF/xposed/java_init.list` 唯一入口是
 `io.github.oppoairpods.popup.AirPodsMyDevicesModule`。`module.prop` 使用
 `minApiVersion=101`、`targetApiVersion=101` 和 `staticScope=true`。
 
-`com.oplus.wirelesssettings` 不在作用域内。源码中的 `WirelessSettingsInjector` 是早期
-“蓝牙设置 > 耳机功能”实验路径，当前 `onPackageLoaded` 不会调用它，也不会安装相关 Hook；
-最终入口只存在于 MyDevices 的 AirPods 设置页。
+`com.heytap.accessory`、`com.oplus.wirelesssettings`、`com.oplus.melody`、Launcher、
+SystemUI 和 Settings 均不在作用域内。早期“蓝牙设置 > 耳机功能”实验路径已删除，最终入口
+只存在于 MyDevices 的 AirPods 设置页。
 
 ## 启动与 Hook 顺序
 
 `onPackageLoaded` 按包名分流：
 
 ```text
-com.android.bluetooth  ─┬─> AapOffFilter
-com.heytap.accessory   ─┘
+com.android.bluetooth  ───> AapOffFilter
 
 com.heytap.mydevices  ───> MyDevices hook set
                             ├─ DeviceApplication.onCreate
@@ -53,6 +51,11 @@ ColorOS 私有 DEX，因此以下类名、方法名和混淆名属于版本相�
 - `com.heytap.mydevices.plugin.airpods.core.AirpodsScanHelper$registerPtc$2$a`
 - `com.heytap.mydevices.DeviceApplication`
 - `aa.b2$a`
+
+3.4.20 对关键路径增加了兼容回退：`AirpodsScanPolicy` 的管理器字段按“带有 registerPtc 方法的字段类型”查找，
+`SeekBarPreference` 的绑定方法和 `SeekBar`/`TextView` 字段按签名与类型查找，`DisconnectFilter` 优先用
+设备自身的 `isConnected` 判断；模块创建的滑杆通过 `SliderRegistry` 标记，只装饰自己的实例。其余 COUI
+混淆方法名和特性开关仍保留已知名契约，不能把“可回退”理解为大版本升级后必然可用。
 
 ## 官方弹窗与自动连接
 
@@ -138,7 +141,7 @@ ColorOS 的 Preference 实现经过混淆，标准 AndroidX 方法名并不存�
 
 ## 生命周期与资源
 
-- 模块 APK 没有应用进程；所有代码都在三个官方目标进程中运行。
+- 模块 APK 没有应用进程；所有代码都在两个官方目标包内运行。
 - AACP 线程随官方进程生命周期结束，`stop()` 会关闭 socket 并中断线程。
 - UI listener 使用 `WeakReference`/弱表或显式注销，设置页销毁时关闭页面状态。
 - 日志最多约 512 KiB，超限轮转到 `debug.log.1`，避免无限增长。
@@ -149,6 +152,6 @@ ColorOS 的 Preference 实现经过混淆，标准 AndroidX 方法名并不存�
 ColorOS 升级可能重命名混淆类、改变 Preference 方法或修改 AACP 行为。任何新版 ROM 都应先：
 
 1. 抓取 `OPPOAirPods` tag 的 logcat 或 MyDevices 外部 `debug.log`。
-2. 核对 `scope.list` 是否仍为三个包。
+2. 核对 `scope.list` 是否仍为两个包。
 3. 在真实 AirPods 上验证官方弹窗、设置页、噪声切换和自动重连。
 4. 对 AirPods Pro 3 单独验证听力保护、头部手势等型号差异，不直接复用 AirPods 5 的结论。

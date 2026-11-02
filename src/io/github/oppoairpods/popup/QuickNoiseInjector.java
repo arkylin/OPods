@@ -133,18 +133,28 @@ final class QuickNoiseInjector {
         void install(ClassLoader loader) throws Exception {
             View view = selector.get();
             if (view == null) throw new IllegalStateException("selector unavailable");
-            Method setItems = view.getClass().getMethod("d", ArrayList.class, int.class);
+            Method setItems = findMethod(view.getClass(), "d",
+                    method -> method.getParameterCount() == 2
+                            && method.getParameterTypes()[0] == ArrayList.class
+                            && method.getParameterTypes()[1] == int.class);
             setItems.invoke(view, items, selectedIndex(controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1)));
             view.getClass().getMethod("setEnableClick", boolean.class).invoke(view, true);
 
             Class<?> listenerType = null;
+            Method registerListener = null;
             for (Method method : view.getClass().getMethods()) {
-                if ("e".equals(method.getName()) && method.getParameterCount() == 3) {
+                if (method.getParameterCount() == 3
+                        && method.getParameterTypes()[0] == String.class
+                        && method.getParameterTypes()[1] == int.class
+                        && method.getParameterTypes()[2].isInterface()) {
+                    registerListener = method;
                     listenerType = method.getParameterTypes()[2];
                     break;
                 }
             }
-            if (listenerType == null) throw new NoSuchMethodException("IconTextSelector.e");
+            if (listenerType == null || registerListener == null) {
+                throw new NoSuchMethodException("IconTextSelector listener setter");
+            }
             Object unit = kotlinUnit(loader);
             Object listener = Proxy.newProxyInstance(listenerType.getClassLoader(),
                     new Class<?>[]{listenerType}, (proxy, method, args) -> {
@@ -157,8 +167,7 @@ final class QuickNoiseInjector {
                         }
                         return method.getReturnType() == boolean.class ? Boolean.FALSE : null;
                     });
-            view.getClass().getMethod("e", String.class, int.class, listenerType)
-                    .invoke(view, device.getAddress(), 0, listener);
+            registerListener.invoke(view, device.getAddress(), 0, listener);
         }
 
         private void onSelected(int index) {
@@ -212,6 +221,18 @@ final class QuickNoiseInjector {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    private static Method findMethod(Class<?> owner, String preferred,
+                                     java.util.function.Predicate<Method> predicate)
+            throws NoSuchMethodException {
+        for (Method method : owner.getMethods()) {
+            if (preferred.equals(method.getName()) && predicate.test(method)) return method;
+        }
+        for (Method method : owner.getMethods()) {
+            if (predicate.test(method)) return method;
+        }
+        throw new NoSuchMethodException(owner.getName() + "." + preferred);
     }
 
     private static Object objectMethod(Object proxy, Method method, Object[] args) {
