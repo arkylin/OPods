@@ -642,6 +642,20 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 return result;
             });
             try {
+                Method onStop = activity.getDeclaredMethod("onStop");
+                hook(onStop).intercept(chain -> {
+                    try {
+                        Context context = appContext != null ? appContext : currentApplication();
+                        if (context != null) AirPodsController.get(context).onSettingsPageClosed();
+                    } catch (Throwable error) {
+                        Logx.w("settings stop handling failed", error);
+                    }
+                    return chain.proceed();
+                });
+            } catch (Throwable error) {
+                Logx.w("settings onStop hook failed", error);
+            }
+            try {
                 Method onDestroy = activity.getDeclaredMethod("onDestroy");
                 hook(onDestroy).intercept(chain -> {
                     try {

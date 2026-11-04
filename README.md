@@ -5,10 +5,10 @@
 
 ## 当前版本
 
-- 当前版本：`v3.4.43`（`versionCode 77`，本地正式签名构建）
+- 当前版本：`v3.4.44`（`versionCode 78`，本地正式签名构建）
 - 上一 GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
-- 当前 APK：`OPPO-AirPods-Enhanced-v3.4.43.apk`
-- SHA-256：`7F41AAEDB7AC929633663EE2EA8AD267D62B855ABDC56285075682311AA4E863`
+- 当前 APK：`OPPO-AirPods-Enhanced-v3.4.44.apk`
+- SHA-256：`3F919AB6AFE5352C83AB7A92DAA5D1CD6B7627DAA4CA39F0FC8C87B64B8D0C0B`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书；3.4.29 同步官方弹窗与耳机页；3.4.30 回写官方 DeviceInfo；3.4.31 去掉相同状态去重并优化 AACP 重连功耗；3.4.32 修复双 AACP 会话并补齐控制 TX/回读日志；3.4.33 修复首屏快捷降噪与全屏耳机页的双向同步；3.4.34 持久化设备设置并在重连后恢复，同时让 OPPO 原生与增强页重复开关共享同一状态
@@ -165,8 +165,8 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器。
 
 ## 安装
 
-1. 使用本地构建产物安装：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.43.apk`。
-2. 3.4.43 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。LSPosed 作用域由设备使用者重新确认。
+1. 使用本地构建产物安装：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.44.apk`。
+2. 3.4.44 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。LSPosed 作用域由设备使用者重新确认。
 3. 在 LSPosed 中启用模块，勾选三个作用域：`com.heytap.mydevices`、`com.heytap.accessory`、`com.android.bluetooth`。
 4. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
 5. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
@@ -183,7 +183,7 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 自定义输出：
 
 ```powershell
-.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.43.apk
+.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.44.apk
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xml 的版本号并构建

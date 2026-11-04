@@ -1,4 +1,4 @@
-# OPods 3.4.43 代码审查与修复记录
+# OPods 3.4.43/3.4.44 代码审查与修复记录
 
 审查日期：2026-11-04
 
@@ -18,6 +18,7 @@
 
 - `onSettingsPageOpened()`、`onPanelOpened()` 会取消待执行的停止任务并确保 AACP 会话存在。
 - `onSettingsPageClosed()`、`onPanelClosed()` 在最后一个官方页面关闭后延迟 1.5 秒停止 AACP 与 ATT，避免页面关闭后线程长期重连。
+- `AirpodsSettingActivity.onStop()` 也进入停止倒计时；用户按 Home 或切到其他 App 时不会继续保留 socket。
 - `stopSession()` 同时清除 `opened` 和首包等待状态。
 - `AacpSession` 只在收到可解析的 AACP 事件后更新有效数据时间；握手 ACK 不再被误判为设备已经可控制。
 - AACP 静默看门狗现在能正确回收“socket 已连接但没有任何有效回包”的会话。
@@ -59,7 +60,7 @@
 - `build.ps1` 编译 27 个 Java 文件通过。
 - `AacpProtocolTest` 通过。
 - `AppleAdvertisementTest` 通过。
-- 3.4.43 APK：`dist/OPPO-AirPods-Enhanced-v3.4.43.apk`
-- SHA-256：`7F41AAEDB7AC929633663EE2EA8AD267D62B855ABDC56285075682311AA4E863`
+- 3.4.44 APK：`dist/OPPO-AirPods-Enhanced-v3.4.44.apk`
+- SHA-256：`3F919AB6AFE5352C83AB7A92DAA5D1CD6B7627DAA4CA39F0FC8C87B64B8D0C0B`
 
 真机安装因审查结束时 ADB 设备已断开而未完成；重新连接后应安装正式签名包并复测：开盖弹窗、手动连接、设置页关闭后线程停止、控制中心电量清除、AirPods Pro 3 ATT 功能。
