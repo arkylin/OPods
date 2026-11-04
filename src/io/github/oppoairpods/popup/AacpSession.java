@@ -14,6 +14,7 @@ import java.lang.reflect.Constructor;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** One AACP control channel. It runs as a daemon thread inside the official MyDevices process. */
 final class AacpSession {
@@ -27,10 +28,12 @@ final class AacpSession {
 
     private static final UUID AACP_UUID = UUID.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a");
     private static final ParcelUuid AACP_PARCEL_UUID = new ParcelUuid(AACP_UUID);
+    private static final AtomicInteger NEXT_SESSION = new AtomicInteger(1);
 
     private final Context context;
     private final String address;
     private final Listener listener;
+    private final int sessionId = NEXT_SESSION.getAndIncrement();
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Object writeLock = new Object();
     private volatile BluetoothSocket socket;
@@ -61,6 +64,10 @@ final class AacpSession {
         return running.get();
     }
 
+    int sessionId() {
+        return sessionId;
+    }
+
     boolean sendControl(int id, int... values) {
         return write(AacpProtocol.control(id, values));
     }
@@ -83,16 +90,20 @@ final class AacpSession {
 
     boolean write(byte[] packet) {
         BluetoothSocket channel = socket;
-        if (channel == null) return false;
+        if (channel == null) {
+            Logx.i("AACP tx #" + sessionId + " skipped: channel not open " + hex(packet));
+            return false;
+        }
         try {
             synchronized (writeLock) {
                 OutputStream output = channel.getOutputStream();
                 output.write(packet);
                 output.flush();
             }
+            Logx.i("AACP tx #" + sessionId + " " + hex(packet));
             return true;
         } catch (Throwable error) {
-            Logx.w("AACP write failed", error);
+            Logx.w("AACP tx #" + sessionId + " failed " + hex(packet), error);
             closeSocket();
             return false;
         }
@@ -105,14 +116,14 @@ final class AacpSession {
                 openAndRead();
                 failures = 0;
             } catch (Throwable error) {
-                if (running.get()) Logx.w("AACP channel closed", error);
+                if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
             } finally {
                 closeSocket();
                 if (running.get()) listener.onClosed();
             }
             if (!running.get()) break;
             failures++;
-            long wait = Math.min(30000L, 1000L << Math.min(5, failures - 1));
+            long wait = Math.min(60000L, 2000L << Math.min(5, failures - 1));
             try {
                 Thread.sleep(wait);
             } catch (InterruptedException interrupted) {
@@ -129,7 +140,7 @@ final class AacpSession {
         BluetoothDevice device = adapter.getRemoteDevice(address);
         if (!isConnected(device)) {
             // Do not page a sleeping case; the controller restarts us on ACL/battery evidence.
-            Thread.sleep(1200L);
+            Thread.sleep(5000L);
             return;
         }
         BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
@@ -149,21 +160,10 @@ final class AacpSession {
             watchdog.interrupt();
         }
         if (!running.get()) return;
-        OutputStream output = channel.getOutputStream();
-        output.write(AacpProtocol.HANDSHAKE);
-        output.flush();
-        Thread.sleep(180L);
-        output.write(AacpProtocol.features());
-        output.flush();
-        Thread.sleep(180L);
-        output.write(AacpProtocol.notifications());
-        output.flush();
-        Thread.sleep(120L);
-        output.write(AacpProtocol.keyRequest(1));
-        output.write(AacpProtocol.keyRequest(4));
-        output.flush();
+        sendInitialization(channel, "initial");
         listener.onOpened();
-        Logx.i("AACP channel opened");
+        Logx.i("AACP channel #" + sessionId + " opened");
+        scheduleInitializationRetry(channel);
         AacpProtocol.Framer framer = new AacpProtocol.Framer();
         InputStream input = channel.getInputStream();
         byte[] buffer = new byte[8192];
@@ -171,6 +171,7 @@ final class AacpSession {
             int count = input.read(buffer);
             if (count <= 0) throw new IOException("AACP stream ended");
             byte[] raw = java.util.Arrays.copyOf(buffer, count);
+            logIncoming(raw);
             if (AacpProtocol.isHeadTracking(raw)) {
                 AacpProtocol.Event head = AacpProtocol.parse(raw);
                 if (head != null) listener.onEvent(head);
@@ -182,6 +183,64 @@ final class AacpSession {
                 if (event != null) listener.onEvent(event);
             }
         }
+    }
+
+    private void sendInitialization(BluetoothSocket channel, String phase) throws Exception {
+        synchronized (writeLock) {
+            if (!running.get() || socket != channel) return;
+            OutputStream output = channel.getOutputStream();
+            output.write(AacpProtocol.HANDSHAKE);
+            output.flush();
+            Thread.sleep(180L);
+            output.write(AacpProtocol.features());
+            output.flush();
+            Thread.sleep(180L);
+            output.write(AacpProtocol.notifications());
+            output.flush();
+            Thread.sleep(120L);
+            output.write(AacpProtocol.keyRequest(1));
+            output.write(AacpProtocol.keyRequest(4));
+            output.flush();
+        }
+        Logx.i("AACP init #" + sessionId + " " + phase);
+    }
+
+    private void scheduleInitializationRetry(BluetoothSocket channel) {
+        Thread retry = new Thread(() -> {
+            try {
+                Thread.sleep(600L);
+                sendInitialization(channel, "retry-1");
+                Thread.sleep(4400L);
+                sendInitialization(channel, "retry-2");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } catch (Throwable ignored) {
+            }
+        }, "OPPO-AirPods-AACP-init");
+        retry.setDaemon(true);
+        retry.start();
+    }
+
+    private void logIncoming(byte[] data) {
+        if (data == null || data.length < 5 || data[0] != 4 || data[1] != 0
+                || data[2] != 4 || data[3] != 0) return;
+        int opcode = data[4] & 0xFF;
+        if (opcode == 0x06 || opcode == 0x09 || opcode == 0x19 || opcode == 0x1D) {
+            Logx.i("AACP rx #" + sessionId + " op=0x" + Integer.toHexString(opcode)
+                    + " len=" + data.length);
+        }
+    }
+
+    private static String hex(byte[] data) {
+        if (data == null) return "null";
+        StringBuilder value = new StringBuilder(data.length * 3);
+        for (int i = 0; i < data.length; i++) {
+            if (i > 0) value.append(' ');
+            String part = Integer.toHexString(data[i] & 0xFF).toUpperCase(java.util.Locale.ROOT);
+            if (part.length() == 1) value.append('0');
+            value.append(part);
+        }
+        return value.toString();
     }
 
     private static boolean isConnected(BluetoothDevice device) {

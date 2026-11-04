@@ -1,11 +1,15 @@
 package io.github.oppoairpods.popup;
 
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.le.ScanFilter;
+import android.bluetooth.le.ScanRecord;
+import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.RelativeLayout;
@@ -16,6 +20,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Map;
 import java.util.function.Predicate;
 
 import io.github.libxposed.api.XposedModule;
@@ -29,9 +34,12 @@ import io.github.libxposed.api.XposedModuleInterface.PackageLoadedParam;
 public final class AirPodsMyDevicesModule extends XposedModule {
     private static final String MYDEVICES = "com.heytap.mydevices";
     private static final String BLUETOOTH = "com.android.bluetooth";
+    private static final String ACCESSORY = "com.heytap.accessory";
     private static final Object INSTALL_LOCK = new Object();
     private static boolean myDevicesHooksInstalled;
     private static boolean aapOffFilterInstalled;
+    private static final java.util.concurrent.atomic.AtomicBoolean DETAIL_BATTERY_HOOKED =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private static volatile Context appContext;
     private static final java.util.concurrent.atomic.AtomicInteger PTC_LOGS =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -47,6 +55,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         ClassLoader loader = param.getDefaultClassLoader();
         if (BLUETOOTH.equals(pkg)) {
             installAapOff(loader);
+            return;
+        }
+        if (ACCESSORY.equals(pkg)) {
+            installAccessoryPtc(loader);
             return;
         }
         if (MYDEVICES.equals(pkg)) {
@@ -68,10 +80,12 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         hookOfficialPopup(loader);
         hookScanCallback(loader);
         hookFusionEvents(loader);
+        hookCoreService(loader);
         hookSettingsPage(loader);
         hookSettingsActivity(loader);
         hookAdaptiveSlider(loader);
         hookDetailPanel(loader);
+        hookOfficialBatteryUi(loader);
         DisconnectFilter.install(this, loader);
         Logx.i("MyDevices hooks installed");
     }
@@ -187,6 +201,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 if (constructor.getParameterCount() < 5) continue;
                 hook(constructor).intercept(chain -> {
                     Object result = chain.proceed();
+                    OfficialDeviceStateBridge.register(chain.getThisObject());
                     try {
                         Field managerField = findFieldWithMethod(policy, "registerPtc");
                         Object manager = managerField.get(chain.getThisObject());
@@ -196,6 +211,33 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     }
                     return result;
                 });
+            }
+            try {
+                Method battery = policy.getDeclaredMethod(
+                        "onBatteryLevelChanged", BluetoothDevice.class, int[].class);
+                hook(battery).intercept(chain -> {
+                    Object target = chain.getThisObject();
+                    OfficialDeviceStateBridge.register(target);
+                    if (!OfficialDeviceStateBridge.applying()) {
+                        try {
+                            Context context = appContext != null ? appContext : currentApplication();
+                            if (context != null) {
+                                AirPodsController controller = AirPodsController.get(context);
+                                if (controller.hasBatterySnapshot()) {
+                                    Logx.i("official device battery replaced with AACP state");
+                                    return chain.proceed(new Object[]{
+                                            chain.getArg(0), controller.officialBatteryArray()});
+                                }
+                            }
+                        } catch (Throwable error) {
+                            Logx.w("official device battery replacement failed", error);
+                        }
+                    }
+                    return chain.proceed();
+                });
+                Logx.i("official device battery hook installed");
+            } catch (Throwable error) {
+                Logx.w("official device battery hook failed", error);
             }
         } catch (Throwable error) {
             Logx.w("AirpodsScanPolicy hook failed", error);
@@ -284,6 +326,105 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             Logx.i("PTC fusion event hook installed");
         } catch (Throwable error) {
             Logx.w("PTC fusion event hook failed", error);
+        }
+    }
+
+    private void installAccessoryPtc(ClassLoader loader) {
+        try {
+            Class<?> output = Class.forName(
+                    "com.oplus.pantaconnect.discovery.core.discover.result.output.m", false, loader);
+            Method handle = null;
+            for (Method method : output.getDeclaredMethods()) {
+                if ("a".equals(method.getName()) && method.getParameterCount() == 1) {
+                    handle = method;
+                    break;
+                }
+            }
+            if (handle == null) throw new NoSuchMethodException("Accessory BLE output.a");
+            hook(handle).intercept(chain -> {
+                try {
+                    Object scanResult = findFieldValue(chain.getArg(0), ScanResult.class);
+                    if (scanResult instanceof ScanResult && isAppleProximity((ScanResult) scanResult)) {
+                        Logx.i("official Accessory Apple BLE result");
+                        detachAirPodsListener(chain.getThisObject());
+                    }
+                } catch (Throwable error) {
+                    Logx.w("Accessory BLE handling failed", error);
+                }
+                return chain.proceed();
+            });
+            Context context = currentApplication();
+            if (context != null) Logx.setContext(context);
+            Logx.i("official Accessory PTC output hook installed");
+        } catch (Throwable error) {
+            Logx.w("Accessory PTC output hook failed", error);
+        }
+    }
+
+    private static boolean isAppleProximity(ScanResult result) {
+        ScanRecord record = result == null ? null : result.getScanRecord();
+        if (record == null) return false;
+        byte[] data = record.getManufacturerSpecificData(76);
+        return data != null && data.length >= 2 && data[0] == 7;
+    }
+
+    private static void detachAirPodsListener(Object output) throws Exception {
+        Object provider = readField(output, "f10092b");
+        if (provider == null) return;
+        Object raw = readField(provider, "f10294e");
+        if (!(raw instanceof Map)) return;
+        int detached = 0;
+        for (Object value : ((Map<?, ?>) raw).values()) {
+            if (value == null || !isAppleDiscovery(value)) continue;
+            Object listener = readField(value, "f10462c");
+            if (listener != null) {
+                writeField(value, "f10462c", null);
+                detached++;
+            }
+        }
+        if (detached > 0) Logx.i("official Accessory PTC listener detached=" + detached);
+    }
+
+    private static boolean isAppleDiscovery(Object value) {
+        try {
+            Object options = readField(value, "f10461b");
+            Object filter = call(options, "getDiscoveryFilter");
+            Object filters = call(filter, "getLeScanFilter");
+            if (!(filters instanceof Iterable)) return false;
+            for (Object item : (Iterable<?>) filters) {
+                if (item instanceof ScanFilter && ((ScanFilter) item).getManufacturerId() == 76) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private void hookCoreService(ClassLoader loader) {
+        try {
+            Class<?> core = Class.forName("com.heytap.mydevices.core.service.CoreService", false, loader);
+            Method onStart = core.getDeclaredMethod("onStartCommand", Intent.class, int.class, int.class);
+            hook(onStart).intercept(chain -> {
+                try {
+                    Object arg = chain.getArg(0);
+                    if (arg instanceof Intent) {
+                        Bundle bundle = ((Intent) arg).getBundleExtra("serviceNode");
+                        if (bundle != null) {
+                            Class<?> nodeKt = Class.forName(
+                                    "com.oplus.pantaconnect.sdk.discovery.fusion.ServiceNodeKt", false, loader);
+                            Object node = nodeKt.getMethod("toServiceNode", Bundle.class).invoke(null, bundle);
+                            handleServiceNode(node);
+                        }
+                    }
+                } catch (Throwable error) {
+                    Logx.w("CoreService PTC wakeup handling failed", error);
+                }
+                return chain.proceed();
+            });
+            Logx.i("CoreService PTC wakeup hook installed");
+        } catch (Throwable error) {
+            Logx.w("CoreService PTC wakeup hook failed", error);
         }
     }
 
@@ -466,6 +607,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 Object result = chain.proceed();
                 try {
                     attachSettingsDevice(chain.getThisObject());
+                    FeatureSupportEnabler.attach(chain.getThisObject());
                 } catch (Throwable error) {
                     Logx.w("settings device attach failed", error);
                 }
@@ -476,7 +618,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 hook(onDestroy).intercept(chain -> {
                     try {
                         Context context = appContext != null ? appContext : currentApplication();
-                        if (context != null) AirPodsController.get(context).onSettingsPageClosed();
+                        if (context != null) {
+                            AirPodsController.get(context).onSettingsPageClosed();
+                            FeatureSupportEnabler.release(chain.getThisObject());
+                        }
                     } catch (Throwable error) {
                         Logx.w("settings close handling failed", error);
                     }
@@ -537,6 +682,88 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             }
         } catch (Throwable error) {
             Logx.w("settings activity hook failed", error);
+        }
+    }
+
+    private void hookOfficialBatteryUi(ClassLoader loader) {
+        try {
+            Class<?> content = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.ui.AirPodsDialogFragment$AirPodsDialogContentFragment",
+                    false, loader);
+            Method update = content.getDeclaredMethod("t0", int[].class);
+            hook(update).intercept(chain -> {
+                Object target = chain.getThisObject();
+                int[] battery = (int[]) chain.getArg(0);
+                Object result = chain.proceed();
+                try {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) {
+                        OfficialBatteryBridge.onOfficialPopup(
+                                target, battery, AirPodsController.get(context));
+                    }
+                } catch (Throwable error) {
+                    Logx.w("official popup battery bridge failed", error);
+                }
+                return result;
+            });
+            Logx.i("official popup battery hook installed");
+        } catch (Throwable error) {
+            Logx.w("official popup battery hook failed", error);
+        }
+
+        try {
+            Class<?> fragment = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.fragment.AirpodsDetailPreferencesFragment",
+                    false, loader);
+            Method init = fragment.getDeclaredMethod("initAirpodsCardAppearance");
+            hook(init).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Object binder = readField(chain.getThisObject(), "airpodsBatteryBinder");
+                    OfficialBatteryBridge.registerDetail(binder);
+                    hookDetailBatteryBinder(binder);
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) {
+                        OfficialBatteryBridge.schedule(AirPodsController.get(context));
+                    }
+                } catch (Throwable error) {
+                    Logx.w("official detail battery bridge failed", error);
+                }
+                return result;
+            });
+            Logx.i("official detail battery hook installed");
+        } catch (Throwable error) {
+            Logx.w("official detail battery hook failed", error);
+        }
+    }
+
+    private void hookDetailBatteryBinder(Object binder) {
+        if (binder == null || DETAIL_BATTERY_HOOKED.get()) return;
+        try {
+            Method update = findMethod(binder.getClass(), "a", method ->
+                    method.getReturnType() == void.class
+                            && method.getParameterCount() == 2
+                            && method.getParameterTypes()[0] == int[].class
+                            && method.getParameterTypes()[1] == boolean.class);
+            hook(update).intercept(chain -> {
+                Object target = chain.getThisObject();
+                int[] battery = (int[]) chain.getArg(0);
+                Object result = chain.proceed();
+                try {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) {
+                        OfficialBatteryBridge.onOfficialDetail(
+                                target, battery, AirPodsController.get(context));
+                    }
+                } catch (Throwable error) {
+                    Logx.w("official detail battery refresh bridge failed", error);
+                }
+                return result;
+            });
+            DETAIL_BATTERY_HOOKED.set(true);
+            Logx.i("official detail battery binder hook installed");
+        } catch (Throwable error) {
+            Logx.w("official detail battery binder hook failed", error);
         }
     }
 
@@ -638,6 +865,47 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             }
         }
         throw new NoSuchFieldException(owner.getName() + " field of " + fieldType.getName());
+    }
+
+    private static Object findFieldValue(Object target, Class<?> fieldType) {
+        if (target == null) return null;
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (field.getType() != fieldType) continue;
+                try {
+                    field.setAccessible(true);
+                    return field.get(target);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object readField(Object target, String name) {
+        if (target == null) return null;
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static void writeField(Object target, String name, Object value) throws Exception {
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                field.set(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new NoSuchFieldException(name);
     }
 
     private static Field findFieldWithMethod(Class<?> owner, String methodName) throws NoSuchFieldException {

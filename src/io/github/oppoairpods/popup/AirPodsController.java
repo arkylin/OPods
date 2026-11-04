@@ -1,5 +1,6 @@
 package io.github.oppoairpods.popup;
 
+import android.app.Application;
 import android.bluetooth.BluetoothA2dp;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -51,6 +52,7 @@ final class AirPodsController implements AacpSession.Listener {
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final SharedPreferences prefs;
+    private final boolean aacpOwner;
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     private final Map<Integer, int[]> controls = Collections.synchronizedMap(new HashMap<>());
     private final Object sessionLock = new Object();
@@ -64,6 +66,9 @@ final class AirPodsController implements AacpSession.Listener {
     private volatile int left = -1;
     private volatile int right = -1;
     private volatile int caseLevel = -1;
+    private volatile int leftStatus = -1;
+    private volatile int rightStatus = -1;
+    private volatile int caseStatus = -1;
     private volatile int chargingMask;
     private volatile int wearPrimary = -1;
     private volatile int wearSecondary = -1;
@@ -99,7 +104,28 @@ final class AirPodsController implements AacpSession.Listener {
     private AirPodsController(Context context) {
         this.context = context;
         this.prefs = context.getSharedPreferences("oppo_airpods_enhanced", Context.MODE_PRIVATE);
+        this.aacpOwner = isAacpOwnerProcess();
         Logx.setContext(context);
+        Logx.i("controller process=" + processName() + " aacpOwner=" + aacpOwner);
+    }
+
+    private static String processName() {
+        try {
+            String name = Application.getProcessName();
+            if (name != null && !name.isEmpty()) return name;
+        } catch (Throwable ignored) {
+        }
+        try {
+            Object name = Class.forName("android.app.ActivityThread")
+                    .getMethod("currentProcessName").invoke(null);
+            if (name instanceof String && !((String) name).isEmpty()) return (String) name;
+        } catch (Throwable ignored) {
+        }
+        return "unknown";
+    }
+
+    private static boolean isAacpOwnerProcess() {
+        return processName().endsWith(":cards");
     }
 
     SharedPreferences prefs() {
@@ -436,6 +462,32 @@ final class AirPodsController implements AacpSession.Listener {
         return chargingMask;
     }
 
+    synchronized int[] officialBatteryArray() {
+        boolean bothInEar = earsBothIn();
+        return new int[]{
+                left, right, caseLevel,
+                officialBatteryStatus(bothInEar ? 2 : leftStatus, left),
+                officialBatteryStatus(bothInEar ? 2 : rightStatus, right),
+                officialBatteryStatus(caseStatus, caseLevel)
+        };
+    }
+
+    synchronized boolean hasBatterySnapshot() {
+        return left >= 0 || right >= 0 || caseLevel >= 0
+                || leftStatus >= 0 || rightStatus >= 0 || caseStatus >= 0;
+    }
+
+    BluetoothDevice currentDevice() {
+        if (address == null || address.isEmpty()) return null;
+        try {
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            return adapter == null ? null : adapter.getRemoteDevice(address);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
     int wearPrimary() {
         return wearPrimary;
     }
@@ -498,6 +550,7 @@ final class AirPodsController implements AacpSession.Listener {
         if (changed) {
             controls.clear();
             left = right = caseLevel = -1;
+            leftStatus = rightStatus = caseStatus = -1;
             chargingMask = 0;
             modelNumber = "";
             firmware = "";
@@ -529,9 +582,13 @@ final class AirPodsController implements AacpSession.Listener {
 
     void onAclDisconnected(BluetoothDevice device) {
         if (device == null || address.isEmpty() || !address.equalsIgnoreCase(device.getAddress())) return;
+        left = right = caseLevel = -1;
+        leftStatus = rightStatus = caseStatus = 4;
+        chargingMask = 0;
         wearPrimary = wearSecondary = -1;
         opened = false;
         stopSession();
+        OfficialBatteryBridge.schedule(this);
         notifyChanged();
     }
 
@@ -712,11 +769,12 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     void ensureSession() {
-        if (address == null || address.isEmpty()) return;
+        if (!aacpOwner || address == null || address.isEmpty()) return;
         synchronized (sessionLock) {
             AacpSession current = session;
             if (current == null || !current.isRunning()) {
                 session = new AacpSession(context, address, this);
+                Logx.i("AACP owner starting session #" + session.sessionId());
                 session.start();
             }
         }
@@ -787,15 +845,27 @@ final class AirPodsController implements AacpSession.Listener {
 
     boolean sendControl(int id, int... values) {
         AacpSession current = session;
-        if (current != null && current.sendControl(id, values)) return true;
+        if (current != null && current.sendControl(id, values)) {
+            Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
+                    + Arrays.toString(values) + " via #" + current.sessionId());
+            return true;
+        }
         ensureSession();
         current = session;
-        if (current != null && current.sendControl(id, values)) return true;
+        if (current != null && current.sendControl(id, values)) {
+            Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
+                    + Arrays.toString(values) + " via #" + current.sessionId());
+            return true;
+        }
+        if (!aacpOwner) {
+            Logx.w("AACP control skipped outside :cards id=0x" + Integer.toHexString(id), null);
+            return false;
+        }
         synchronized (pendingControls) {
             if (pendingControls.size() >= 32) pendingControls.removeFirst();
             pendingControls.addLast(valuesWithId(id, values));
         }
-        Logx.i("control queued until AACP opens: " + Integer.toHexString(id));
+        Logx.i("AACP control queued until AACP opens: 0x" + Integer.toHexString(id));
         return true;
     }
 
@@ -812,6 +882,7 @@ final class AirPodsController implements AacpSession.Listener {
         ensureSession();
         current = session;
         if (current != null && current.sendEqualizer(enabled, low, mid, high)) return true;
+        if (!aacpOwner) return false;
         pendingEqualizer = new int[]{enabled, low, mid, high};
         return true;
     }
@@ -819,9 +890,11 @@ final class AirPodsController implements AacpSession.Listener {
     @Override
     public void onOpened() {
         opened = true;
+        AacpSession current = session;
+        Logx.i("AACP ready session=" + (current == null ? -1 : current.sessionId()));
         ensureAttSession();
-        flushPending();
-        applyStemConfig();
+        main.postDelayed(this::flushPending, 250L);
+        main.postDelayed(this::applyStemConfig, 500L);
         notifyChanged();
     }
 
@@ -864,20 +937,44 @@ final class AirPodsController implements AacpSession.Listener {
         if (event == null) return;
         switch (event.type) {
             case AacpProtocol.Event.TYPE_BATTERY:
-                if (event.left >= 0) left = event.left;
-                if (event.right >= 0) right = event.right;
-                if (event.caseLevel >= 0) caseLevel = event.caseLevel;
-                chargingMask = event.chargingMask;
+                if (event.leftStatus >= 0) {
+                    leftStatus = event.leftStatus;
+                    left = event.left;
+                }
+                if (event.rightStatus >= 0) {
+                    rightStatus = event.rightStatus;
+                    right = event.right;
+                }
+                if (event.caseStatus >= 0) {
+                    caseStatus = event.caseStatus;
+                    caseLevel = event.caseLevel;
+                }
+                recomputeChargingMask();
+                Logx.i("AACP battery L=" + left + "/" + leftStatus
+                        + " R=" + right + "/" + rightStatus
+                        + " C=" + caseLevel + "/" + caseStatus);
                 BatteryNotifier.onBattery(this, left, right, caseLevel, chargingMask);
+                OfficialBatteryBridge.schedule(this);
+                OfficialDeviceStateBridge.schedule(this);
                 break;
             case AacpProtocol.Event.TYPE_CONTROL:
-                controls.put(event.controlId, event.values);
+                int[] previousControl = controls.put(event.controlId, event.values);
+                Logx.i("AACP control <- id=0x" + Integer.toHexString(event.controlId)
+                        + " values=" + Arrays.toString(event.values));
+                if (!Arrays.equals(previousControl, event.values)) notifyChanged();
                 break;
             case AacpProtocol.Event.TYPE_WEAR:
                 int previous = inEarCount();
                 wearPrimary = event.primaryWear;
                 wearSecondary = event.secondaryWear;
+                if (wearPrimary == 0 && wearSecondary == 0) {
+                    leftStatus = 2;
+                    rightStatus = 2;
+                    recomputeChargingMask();
+                }
                 EarPlaybackController.onWearChanged(this, previous, inEarCount());
+                OfficialBatteryBridge.schedule(this);
+                OfficialDeviceStateBridge.schedule(this);
                 break;
             case AacpProtocol.Event.TYPE_INFO:
                 if (event.name != null && !event.name.isEmpty()) modelName = event.name;
@@ -919,6 +1016,29 @@ final class AirPodsController implements AacpSession.Listener {
         if (wearPrimary == 0) count++;
         if (wearSecondary == 0) count++;
         return count;
+    }
+
+    private void recomputeChargingMask() {
+        int mask = 0;
+        if (!earsBothIn()) {
+            if (isChargingStatus(leftStatus)) mask |= 1;
+            if (isChargingStatus(rightStatus)) mask |= 2;
+        }
+        if (isChargingStatus(caseStatus)) mask |= 4;
+        chargingMask = mask;
+    }
+
+    private boolean earsBothIn() {
+        return wearPrimary == 0 && wearSecondary == 0;
+    }
+
+    private static boolean isChargingStatus(int status) {
+        return status == 1 || status == 5;
+    }
+
+    private static int officialBatteryStatus(int status, int level) {
+        if (level < 0 || status == 4) return 4;
+        return isChargingStatus(status) ? 1 : 2;
     }
 
     boolean ownsPause() {

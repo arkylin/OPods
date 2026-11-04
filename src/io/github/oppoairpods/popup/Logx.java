@@ -1,6 +1,8 @@
 package io.github.oppoairpods.popup;
 
+import android.app.Application;
 import android.content.Context;
+import android.os.Process;
 import android.util.Log;
 
 import java.io.File;
@@ -14,6 +16,7 @@ final class Logx {
     static final String TAG = "OPPOAirPods";
     private static final Object LOCK = new Object();
     private static volatile File file;
+    private static final String PROCESS = processName();
 
     private Logx() {}
 
@@ -58,7 +61,9 @@ final class Logx {
                 }
                 String time = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.ROOT).format(new Date());
                 StringBuilder line = new StringBuilder();
-                line.append(time).append(' ').append(level).append(' ').append(message).append('\n');
+                line.append(time).append(' ').append(level).append(" [")
+                        .append(PROCESS).append('/').append(Process.myPid()).append("] ")
+                        .append(message).append('\n');
                 if (error != null) {
                     line.append(error.getClass().getName()).append(": ").append(error.getMessage()).append('\n');
                     StackTraceElement[] trace = error.getStackTrace();
@@ -75,5 +80,14 @@ final class Logx {
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    private static String processName() {
+        try {
+            String name = Application.getProcessName();
+            if (name != null && !name.isEmpty()) return name;
+        } catch (Throwable ignored) {
+        }
+        return "unknown";
     }
 }

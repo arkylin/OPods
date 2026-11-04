@@ -9,7 +9,7 @@ import java.util.List;
 final class AacpProtocol {
     static final int PSM = 0x1001;
     static final byte[] HEADER = {4, 0, 4, 0};
-    static final byte[] HANDSHAKE = {0, 0, 4, 0, 1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    static final byte[] HANDSHAKE = {0, 0, 4, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
     static final int OP_BATTERY = 0x04;
     static final int OP_EAR_DETECTION = 0x06;
@@ -135,6 +135,9 @@ final class AacpProtocol {
         int left = -1;
         int right = -1;
         int caseLevel = -1;
+        int leftStatus = -1;
+        int rightStatus = -1;
+        int caseStatus = -1;
         int chargingMask;
         int controlId = -1;
         int[] values = new int[0];
@@ -231,10 +234,17 @@ final class AacpProtocol {
             int component = u(packet, pos);
             int level = u(packet, pos + 2);
             int status = u(packet, pos + 3);
-            if (component == 2) event.right = level <= 100 && status != 4 ? level : -1;
-            else if (component == 4) event.left = level <= 100 && status != 4 ? level : -1;
-            else if (component == 8) event.caseLevel = level <= 100 && status != 4 ? level : -1;
-            if (status == 1) {
+            if (component == 2) {
+                event.right = level <= 100 && status != 4 ? level : -1;
+                event.rightStatus = status;
+            } else if (component == 4) {
+                event.left = level <= 100 && status != 4 ? level : -1;
+                event.leftStatus = status;
+            } else if (component == 8) {
+                event.caseLevel = level <= 100 && status != 4 ? level : -1;
+                event.caseStatus = status;
+            }
+            if (status == 1 || status == 5) {
                 if (component == 2) event.chargingMask |= 2;
                 else if (component == 4) event.chargingMask |= 1;
                 else if (component == 8) event.chargingMask |= 4;

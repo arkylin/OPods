@@ -182,7 +182,7 @@ final class QuickNoiseInjector {
         @Override
         public void onAirPodsStateChanged() {
             View view = selector.get();
-            if (view == null || !view.isAttachedToWindow()) return;
+            if (view == null) return;
             int mode = controller.controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 1);
             if (mode == lastMode) return;
             lastMode = mode;
@@ -191,6 +191,7 @@ final class QuickNoiseInjector {
                         .getDeclaredMethod("setSelectedPosition", int.class);
                 select.setAccessible(true);
                 select.invoke(view, selectedIndex(mode));
+                Logx.i("quick noise synced mode=" + mode);
             } catch (Throwable error) {
                 Logx.w("quick noise refresh failed", error);
             }

@@ -7,7 +7,7 @@ param(
     [string]$KeystorePassword = 'android',
     [string]$KeyAlias = 'androiddebugkey',
     [string]$KeyPassword = 'android',
-    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.27.apk'
+    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.33.apk'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -168,6 +168,17 @@ try {
 $aligned = Join-Path $buildFull 'aligned.apk'
 & $zipalign -f 4 $unsigned $aligned
 if ($LASTEXITCODE -ne 0) { throw 'zipalign failed' }
+
+$localReleaseKeystore = Join-Path $root '.keystore/opods-release.jks'
+$localReleasePasswordFile = Join-Path $root '.keystore/opods-release.pass'
+if (-not $Keystore -and (Test-Path -LiteralPath $localReleaseKeystore) -and
+    (Test-Path -LiteralPath $localReleasePasswordFile)) {
+    $Keystore = $localReleaseKeystore
+    $KeystorePassword = [IO.File]::ReadAllText($localReleasePasswordFile).Trim()
+    $KeyAlias = 'opods-release'
+    $KeyPassword = $KeystorePassword
+    Write-Host 'Using local release keystore'
+}
 
 if (-not $Keystore) {
     $Keystore = Join-Path $root '.keystore/oppo-airpods-debug.keystore'

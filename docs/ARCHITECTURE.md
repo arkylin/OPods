@@ -90,6 +90,16 @@ ACL 连接广播也会触发同一路径。设置页打开时不会重复弹窗�
 - 佩戴状态、充电状态和设置页生命周期；
 - 各官方条目注册的 UI listener。
 
+官方弹窗的 `t0(int[])` 与耳机页电池 binder 的 `void(int[], boolean)` 会把框架缓存交给
+`OfficialBatteryBridge`。桥接层只在主线程用当前 AACP 组件级快照重绘同一组官方 View，
+同时把 `status=1/5` 识别为充电、`2` 为未充电、`4` 为断开；不创建连接或后台线程。
+
+控制中心磁贴走另一条上游链路：`AirpodsScanPolicy.onBatteryLevelChanged()` 把官方电池数组
+写入 `DeviceInfo.batteryList`，再由 `ControlCenterManager` 生成 `PanelDevice`。3.4.31 在该
+回调入口用 AACP 快照替换框架旧值，并在每次 AACP 电量/佩戴或官方 UI 回调时通过
+`OfficialDeviceStateBridge` 重新触发官方回调；不再按相同数组去重，因此不需要 Hook
+`com.android.systemui`。
+
 状态只存在目标官方进程的内存和该包自己的 SharedPreferences 中，不向外导出 Provider 或文件接口。
 
 ## 官方设置页注入
@@ -152,6 +162,6 @@ ColorOS 的 Preference 实现经过混淆，标准 AndroidX 方法名并不存�
 ColorOS 升级可能重命名混淆类、改变 Preference 方法或修改 AACP 行为。任何新版 ROM 都应先：
 
 1. 抓取 `OPPOAirPods` tag 的 logcat 或 MyDevices 外部 `debug.log`。
-2. 核对 `scope.list` 是否仍为两个包。
+2. 核对 `scope.list` 是否仍为三个包。
 3. 在真实 AirPods 上验证官方弹窗、设置页、噪声切换和自动重连。
 4. 对 AirPods Pro 3 单独验证听力保护、头部手势等型号差异，不直接复用 AirPods 5 的结论。

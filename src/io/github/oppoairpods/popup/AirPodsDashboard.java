@@ -967,7 +967,7 @@ final class AirPodsDashboard {
             PackageInfo info = context.getPackageManager().getPackageInfo("io.github.oppoairpods.popup", 0);
             return info.versionName;
         } catch (Throwable ignored) {
-            return "3.4.27";
+            return "3.4.31";
         }
     }
 
@@ -976,7 +976,7 @@ final class AirPodsDashboard {
             PackageInfo info = context.getPackageManager().getPackageInfo("io.github.oppoairpods.popup", 0);
             return String.valueOf(info.getLongVersionCode());
         } catch (Throwable ignored) {
-            return "61";
+            return "65";
         }
     }
 

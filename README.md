@@ -5,13 +5,13 @@
 
 ## 当前版本
 
-- 版本：`v3.4.27`（`versionCode 61`）
-- GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
-- 发布 APK：`OPods-v3.4.27-arm64-v8a.apk`（由 GitHub Actions 构建）
-- SHA-256：`B05ABCC231E0D76B7A5A428463B98A364A59322AFDD9F457F12D6C3B3E00FB2C`
+- 当前版本：`v3.4.33`（`versionCode 67`，本地正式签名构建）
+- 上一 GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
+- 当前 APK：`OPPO-AirPods-Enhanced-v3.4.33.apk`
+- SHA-256：`13F0898D4FE864EE596CB906EDF1676E3B0D0F08D61C558A65AA8894132D4160`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
-- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书
+- 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书；3.4.29 同步官方弹窗与耳机页；3.4.30 回写官方 DeviceInfo；3.4.31 去掉相同状态去重并优化 AACP 重连功耗；3.4.32 修复双 AACP 会话并补齐控制 TX/回读日志；3.4.33 修复首屏快捷降噪与全屏耳机页的双向同步
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE 和头部手势仍需对应真机验收。
 
@@ -50,27 +50,28 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 设备 | 噪声、自适应音量、对话感知、单耳降噪、按键速度/时长、音量滑动、EQ、麦克风、人耳检测、自动连接 `0x20`、睡眠、充电、允许关闭、PPE、助听、通透 | 通过 AACP 控制或 ATT 写入 AirPods |
 | 手机 | `ear_playback`、`battery_alerts`、`auto_connect`、`equalizer_preset`、`head_gestures`、`head_gesture_calls` | MyDevices 进程内 SharedPreferences，不写入耳机 |
 | 手机协同 | 入耳播放、开盖连接、头部手势、通话接听键 | 耳机上报事件，手机执行媒体键/蓝牙 Profile/KEYCODE |
-| 官方页面 | 个性化空间音频、部分 OPPO 原生设置 | 只发 Intent 打开官方 Activity，不直接改官方数据 |
-| 只读 | 电量、佩戴、型号、序列号、固件、AACP/ATT 状态 | AACP `0x04`/`0x06`/`0x1D`、ATT `0A` 读取 |
+| 官方页面 | 个性化空间音频、部分 OPPO 原生设置 | 只发 Intent 打开官方 Activity；电池桥只重绘官方 View，不写官方持久数据 |
+| 只读 | 电量、佩戴、型号、序列号、固件、AACP/ATT 状态 | AACP `0x04`/`0x06`/`0x1D`、ATT `0A` 读取；AACP 电量状态会回写官方弹窗和耳机页的电池组件 |
 
 `关于`页有完整图例，且每个控件下方都有对应的协议/存储标注。
 
-## Hook 范围：两个进程，22 个 Hook 点
+## Hook 范围：三个进程，28 个 Hook 点
 
-`xposed/scope.list` 只声明两个包，所有增强逻辑都通过 LibXposed 的
+`xposed/scope.list` 只声明三个包，所有增强逻辑都通过 LibXposed 的
 `module.hook(...).intercept(...)` 在官方进程内完成，不使用 `XposedBridge` 直接 Hook，
 也不在第三方 App、Launcher、SystemUI 或 Settings 中注入。
 
 | 进程 | Hook 点数 | 职责 |
 | --- | ---: | --- |
-| `com.heytap.mydevices` | 21 | 官方 AirPods 弹窗、扫描/PTC、详情页、设置页、AACP/ATT 与假断开过滤 |
+| `com.heytap.mydevices` | 26 | 官方 AirPods 弹窗、扫描/PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
+| `com.heytap.accessory` | 1 | 被动观察官方 Apple 邻近包，让官方 PTC 唤醒走既有 MyDevices 流程 |
 | `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
 > 计数口径是源码中的 `hook(...)` 调用点。`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，
 > 因此运行时实际 Hook 的构造器数量可能多于 1；`AirpodsScanHelper.registerPtc()` 仅观察官方注册结果，
 > 不改变官方流程。
 
-### `com.heytap.mydevices`：21 个 Hook 点
+### `com.heytap.mydevices`：26 个 Hook 点
 
 | # | 目标类 / 方法 | 作用 |
 | ---: | --- | --- |
@@ -95,6 +96,17 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 19 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 当类型为 `4`（噪声控制）时改走 AACP 设置聆听模式；其他类型继续官方实现。 |
 | 20 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
 | 21 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
+| 22 | `CoreService.onStartCommand(Intent, int, int)` | 解析官方 PTC `serviceNode`，补全开盖唤醒后的官方 `onCaseAdvertisement` 路径。 |
+| 23 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗。 |
+| 24 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
+| 25 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
+| 26 | `AirpodsScanPolicy.onBatteryLevelChanged(BluetoothDevice, int[])` | 把框架旧电池数组替换为 AACP 快照；这是控制中心 DeviceInfo/设备磁贴的数据上游。 |
+
+### `com.heytap.accessory`：1 个 Hook 点
+
+| 目标类 / 方法 | 作用 |
+| --- | --- |
+| `com.oplus.pantaconnect.discovery.core.discover.result.output.m.a(...)` | 被动观察官方 ScanResult；只对 Apple `ManufacturerId=76`、首字节 `07` 的邻近包解除官方 AirPods listener，不建立第二套 BLE 扫描。 |
 
 ### `com.android.bluetooth`：1 个 Hook 点
 
@@ -105,7 +117,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 ### 明确不 Hook
 
 - `AirpodsDiscoveryActivity` 本身不 Hook；弹窗仍由官方 PTC/ACL 流程触发并复用官方 Activity。
-- `com.heytap.accessory`：不作为作用域，Off 帧过滤只保留在 `com.android.bluetooth`，避免多进程重复 Hook。
+- `com.heytap.accessory` 只保留上述 1 个被动 PTC 观察点；Off 帧过滤和 AACP/ATT 仍只在 MyDevices/Bluetooth 中完成，避免重复连接路径。
 - `com.oplus.wirelesssettings`：旧版“蓝牙设置 → 耳机功能”实验路径已删除，当前只使用 MyDevices 官方页。
 - `com.oplus.melody`、Launcher、SystemUI、Settings 和第三方 App：不 Hook。
 - 模块不创建自建 BLE 扫描、主动重连 watchdog、后台监听 Service 或独立连接路径。
@@ -152,9 +164,9 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器。
 
 ## 安装
 
-1. 从最新 Release 下载 `OPods-v3.4.27-arm64-v8a.apk`，或使用本地构建产物安装：`adb install -r <APK路径>`。
-2. 3.4.27 使用新的正式签名证书；从旧的 debug 签名 3.4.26 升级会因签名不一致失败，需要先卸载旧模块再安装。LSPosed 作用域由设备使用者重新确认。
-3. 在 LSPosed 中启用模块，勾选两个作用域：`com.heytap.mydevices`、`com.android.bluetooth`。
+1. 使用本地构建产物安装：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.33.apk`。
+2. 3.4.33 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。LSPosed 作用域由设备使用者重新确认。
+3. 在 LSPosed 中启用模块，勾选三个作用域：`com.heytap.mydevices`、`com.heytap.accessory`、`com.android.bluetooth`。
 4. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
 5. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
 
@@ -170,7 +182,7 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 自定义输出：
 
 ```powershell
-.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.27.apk
+.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.33.apk
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xml 的版本号并构建
@@ -194,6 +206,9 @@ GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xm
 - `MyDevices hooks installed`
 - `Hook failed` / `hook failed`
 - `official feature support forced for AirPods`
+- `official popup battery hook installed` / `official detail battery hook installed`
+- `AACP battery L=.../... R=.../... C=.../...` 和 `AACP battery -> official UI [...]`
+- `official device battery hook installed` 和 `AACP battery -> official DeviceInfo [...]`
 - `ATT channel closed`
 - `control queued until AACP opens`
 

@@ -1,4 +1,4 @@
-# LibrePods v1.0.4 → OPods 3.4.27 功能接入审计
+# LibrePods v1.0.4 → OPods 3.4.31 功能接入审计
 
 审计日期：2026-11-02
 
@@ -6,18 +6,19 @@
 - 上游：LibrePods-v1.0.4/android/app/src/main/java/me/kavishdevar/librepods
 - 模块：OPods/src/io/github/oppoairpods/popup
 - 目标：AirPods 5、AirPods Pro 3
-- 构建：dist/OPPO-AirPods-Enhanced-v3.4.27.apk，versionCode 61
-- SHA-256：B0ACF545B1EC935726689294C7D0A57D27C11396C0F10EF59EBFE28CA382A91E
+- 构建：dist/OPPO-AirPods-Enhanced-v3.4.31.apk，versionCode 65
+- SHA-256：156FD6A5C23BE5735DBC14A4684AC47DACCF9B5C9B8258223741714263F0C1BF
 
 ## 结论
 
-3.4.27 在 3.4.19 已验收功能的基础上，补齐了逐控件协议/存储标注和独立的“关于”页，
+3.4.31 在 3.4.19 已验收功能的基础上，补齐了逐控件协议/存储标注和独立的“关于”页，
 并把关键 Hook 从单一混淆名改为“已知名优先、签名/类型回退”。3.4.19 已由 ADB 安装到
-一加 13 并完成 UI 冒烟验收；3.4.27 切换到新的 100 年正式 Release 证书，功能与 3.4.26 相同。
+一加 13 并完成 UI 冒烟验收；3.4.27 切换到新的 100 年正式 Release 证书；3.4.29 增加
+AACP 组件级电量/充电状态到官方弹窗、耳机页、控制中心 DeviceInfo 与 AirPods 设备磁贴的镜像。
 
 Pro 3 的助听/PPE、ATT 读写和头部手势阈值仍需要对应真机验证。
 
-## 3.4.27 UI
+## 3.4.29 UI
 
 官方页只保留首屏四个噪声快捷按钮、官方噪声横条、自适应强度和“AirPods 增强”入口。
 入口内部是七页卡片式 Dialog：
@@ -56,18 +57,19 @@ Pro 3 的助听/PPE、ATT 读写和头部手势阈值仍需要对应真机验证
 
 ## Hook 范围与更新兼容
 
-xposed/scope.list 只声明两个作用域：
+xposed/scope.list 只声明三个作用域：
 
 | 包名 | 用途 |
 | --- | --- |
 | com.heytap.mydevices | 官方 AirPods 弹窗、详情页、设置页、AACP/ATT、自动连接和本地偏好 |
+| com.heytap.accessory | 被动观察官方 Apple 邻近结果，补全官方 PTC 唤醒 |
 | com.android.bluetooth | 只过滤 ColorOS 精确的 DISABLE_OFF 帧 |
 
-不再 Hook com.heytap.accessory、com.oplus.wirelesssettings、com.oplus.melody、Launcher、SystemUI 或 Settings。
+不再 Hook com.oplus.wirelesssettings、com.oplus.melody、Launcher、SystemUI 或 Settings。
 
 更新兼容措施：
 - 将官方 PTC 的 Apple 邻近数据过滤器从 `07 19 07 / 07 0F 00` 放宽为 `07 19 / 07 0F` 前缀，适配 AirPods 5 的邻近包变化。
-- 3.4.26 不创建自建 BLE 扫描、不启动主动重连 watchdog；只在官方 PTC/ACL 回调里记录数据并复用官方 `onCaseAdvertisement → connectProfiles → AirpodsDiscoveryActivity` 流程。
+- 3.4.29 不创建自建 BLE 扫描、不启动主动重连 watchdog；只在官方 PTC/ACL 回调里记录数据并复用官方 `onCaseAdvertisement → connectProfiles → AirpodsDiscoveryActivity` 流程。
 - Bluetooth 只拦截 11 字节完全匹配的 04 00 04 00 09 00 34 02 00 00 00，其他写入原样放行。
 - AirpodsBluetoothManager 的 STATE_DISCONNECTED 分发方法按参数签名查找，并优先用设备自身 isConnected 判断，减少对混淆方法 P 的依赖。
 - 自适应滑杆按一个参数/void 返回查找绑定方法，按 SeekBar/TextView 字段类型取值。
@@ -86,8 +88,8 @@ xposed/scope.list 只声明两个作用域：
 
 ## 构建与验收
 
-APK：dist/OPPO-AirPods-Enhanced-v3.4.27.apk
+APK：dist/OPPO-AirPods-Enhanced-v3.4.31.apk
 
-SHA-256：B0ACF545B1EC935726689294C7D0A57D27C11396C0F10EF59EBFE28CA382A91E
+SHA-256：156FD6A5C23BE5735DBC14A4684AC47DACCF9B5C9B8258223741714263F0C1BF
 
-AACP 单测已通过。3.4.26 已安装并完成一次官方 ACL/弹窗复测；不要由模块自动操作 LSPosed。
+AACP 单测已通过。3.4.26 已安装并完成一次官方 ACL/弹窗复测；3.4.29 已安装为 versionCode 63，电池 UI 镜像仍需在用户重启官方进程后复测；不要由模块自动操作 LSPosed。
