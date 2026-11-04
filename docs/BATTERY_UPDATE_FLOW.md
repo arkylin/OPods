@@ -57,10 +57,17 @@ AACP `0x04` 的每个组件按以下规则映射到官方数组：
 - AACP 读取是一个 MyDevices 进程内的 daemon 线程；连接建立后阻塞在
   `InputStream.read()`，电量、佩戴、控制回读都由耳侧通知驱动，不按键轮询。
 - 正常连接状态下主要事件是约每分钟一次的电量通知和佩戴变化；不做周期扫描。
-- ACL 断开时 `AirPodsController.onAclDisconnected` 会关闭 socket 并停止线程。
-- AACP 链路异常时使用指数退避重连：3.4.31 从 1–30 秒调整为 2–60 秒；ACL 未连接时
-  等待 5 秒，避免短周期唤醒。
-- 官方弹窗/耳机页桥和 DeviceInfo 桥只在收到状态时向主线程投递一次刷新，没有定时器。
+- ACL 断开或 AACP 链路失效时立即停止 AACP；不保留后台重连 watchdog。
+- 只有官方弹窗或耳机页可见时才允许 AACP 链路异常重试；页面关闭后不重连，等待下一次官方弹窗/耳机页触发。
+- 3.4.45 起，AACP 电量在 `:cards` 进程产生，经官方 CoreService IPC 发送到主进程 `AirpodsScanPolicy`，再由官方 `DeviceInfo`/`CachedDevices` 刷新控制中心磁贴。
+## 3.4.45 磁贴电量链路
+
+`:cards` AACP battery event -> CrossProcessState snapshot -> official CoreService IPC (`airpods` / `OPODS_AACP_BATTERY_V1`) -> core `AirpodsManager.process` hook -> `AirpodsScanPolicy.onBatteryLevelChanged` -> `DeviceInfo.batteryList` -> `CachedDevices` -> `ControlCenterManager` -> SystemUI tile.
+
+- AACP remains only while the official ACL is connected; no new process, service, scanner or reconnect watchdog is added.
+- When the official popup/settings page closes, ATT stops and AACP retries are disabled; a link error stops the session until the next official popup/settings open.
+- The cross-process snapshot is also written to the app-private state file, so a late-created `AirpodsScanPolicy` can seed the last valid battery once.
+
 
 总体功耗与系统自带蓝牙耳机电量回调同一量级，额外成本主要是一条 AACP L2CAP 通道及其
 事件通知，不是 CPU 常驻轮询。

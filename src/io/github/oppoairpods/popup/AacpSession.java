@@ -23,7 +23,7 @@ final class AacpSession {
 
         void onEvent(AacpProtocol.Event event);
 
-        void onClosed();
+        void onClosed(boolean linkDown);
     }
 
     private static final UUID AACP_UUID = UUID.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a");
@@ -39,6 +39,7 @@ final class AacpSession {
     private volatile BluetoothSocket socket;
     private volatile Thread thread;
     private volatile long lastReceiveAt;
+    private volatile boolean allowRetries = true;
 
     AacpSession(Context context, String address, Listener listener) {
         this.context = context.getApplicationContext() == null ? context : context.getApplicationContext();
@@ -63,6 +64,10 @@ final class AacpSession {
 
     boolean isRunning() {
         return running.get();
+    }
+
+    void setAllowRetries(boolean value) {
+        allowRetries = value;
     }
 
     boolean ready() {
@@ -121,16 +126,26 @@ final class AacpSession {
     private void loop() {
         int failures = 0;
         while (running.get()) {
+            boolean linkDown = false;
             try {
                 openAndRead();
                 failures = 0;
+            } catch (LinkLostException lost) {
+                linkDown = true;
+                if (running.get()) Logx.i("AACP channel #" + sessionId + " ACL lost");
             } catch (Throwable error) {
                 if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
             } finally {
                 closeSocket();
-                if (running.get()) listener.onClosed();
+                boolean stopSession = linkDown || (!allowRetries && running.get());
+                if (stopSession && !linkDown && running.get()) {
+                    Logx.i("AACP channel #" + sessionId + " background retry disabled; stopping");
+                }
+                if (running.get()) listener.onClosed(stopSession);
             }
+            if (linkDown) break;
             if (!running.get()) break;
+            if (!allowRetries) break;
             failures++;
             long wait = Math.min(60000L, 2000L << Math.min(5, failures - 1));
             try {
@@ -148,9 +163,7 @@ final class AacpSession {
         if (adapter == null || !adapter.isEnabled()) throw new IOException("Bluetooth unavailable");
         BluetoothDevice device = adapter.getRemoteDevice(address);
         if (!isConnected(device)) {
-            // Do not page a sleeping case; the controller restarts us on ACL/battery evidence.
-            Thread.sleep(5000L);
-            return;
+            throw new LinkLostException("ACL disconnected");
         }
         BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
         lastReceiveAt = 0L;
@@ -282,6 +295,12 @@ final class AacpSession {
             return value instanceof Boolean && (Boolean) value;
         } catch (Throwable ignored) {
             return true;
+        }
+    }
+
+    private static final class LinkLostException extends IOException {
+        LinkLostException(String message) {
+            super(message);
         }
     }
 

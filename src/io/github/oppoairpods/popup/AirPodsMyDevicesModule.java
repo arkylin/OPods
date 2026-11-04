@@ -85,6 +85,9 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         hookScanCallback(loader);
         hookFusionEvents(loader);
         hookCoreService(loader);
+        hookInnerIpc(loader);
+        hookAirpodsIpc(loader);
+        hookDiscoveryActivity(loader);
         hookSettingsPage(loader);
         hookSettingsActivity(loader);
         hookAdaptiveSlider(loader);
@@ -205,7 +208,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 if (constructor.getParameterCount() < 5) continue;
                 hook(constructor).intercept(chain -> {
                     Object result = chain.proceed();
-                    OfficialDeviceStateBridge.register(chain.getThisObject());
+                    Context context = appContext != null ? appContext : currentApplication();
+                    OfficialDeviceStateBridge.register(chain.getThisObject(), context);
                     try {
                         Field managerField = findFieldWithMethod(policy, "registerPtc");
                         Object manager = managerField.get(chain.getThisObject());
@@ -221,10 +225,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         "onBatteryLevelChanged", BluetoothDevice.class, int[].class);
                 hook(battery).intercept(chain -> {
                     Object target = chain.getThisObject();
-                    OfficialDeviceStateBridge.register(target);
+                    Context context = appContext != null ? appContext : currentApplication();
+                    OfficialDeviceStateBridge.register(target, context);
                     if (!OfficialDeviceStateBridge.applying()) {
                         try {
-                            Context context = appContext != null ? appContext : currentApplication();
                             if (context != null) {
                                 AirPodsController controller = AirPodsController.get(context);
                                 if (controller.hasBatterySnapshot()) {
@@ -432,6 +436,50 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         }
     }
 
+    private void hookInnerIpc(ClassLoader loader) {
+        try {
+            Class<?> ipc = Class.forName("com.oplus.mydevices.deviceui.ipc.InnerIpcManager", false, loader);
+            for (Constructor<?> constructor : ipc.getDeclaredConstructors()) {
+                if (constructor.getParameterCount() != 2) continue;
+                hook(constructor).intercept(chain -> {
+                    Object result = chain.proceed();
+                    OfficialCoreBridge.registerIpcManager(chain.getThisObject());
+                    return result;
+                });
+            }
+            Logx.i("official core IPC manager hook installed");
+        } catch (Throwable error) {
+            Logx.w("official core IPC manager hook failed", error);
+        }
+    }
+
+    private void hookAirpodsIpc(ClassLoader loader) {
+        try {
+            Class<?> manager = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.core.AirpodsManager", false, loader);
+            Method process = findMethod(manager, "process", method ->
+                    method.getReturnType() == String.class
+                            && method.getParameterCount() == 4
+                            && method.getParameterTypes()[0] == String.class
+                            && method.getParameterTypes()[1] == String.class
+                            && method.getParameterTypes()[2] == Bundle.class
+                            && method.getParameterTypes()[3] == int.class);
+            hook(process).intercept(chain -> {
+                if (OfficialCoreBridge.PARAM_BATTERY.equals(chain.getArg(0))) {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) {
+                        OfficialDeviceStateBridge.applyPayload(context, (String) chain.getArg(1));
+                    }
+                    return "";
+                }
+                return chain.proceed();
+            });
+            Logx.i("AirPods core battery IPC hook installed");
+        } catch (Throwable error) {
+            Logx.w("AirPods core battery IPC hook failed", error);
+        }
+    }
+
     private void hookSettingsPage(ClassLoader loader) {
         try {
             Class<?> fragment = Class.forName(
@@ -450,6 +498,55 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             });
         } catch (Throwable error) {
             Logx.w("settings page hook failed", error);
+        }
+    }
+
+    private void hookDiscoveryActivity(ClassLoader loader) {
+        try {
+            Class<?> activity = Class.forName(
+                    "com.heytap.mydevices.plugin.airpods.ui.AirpodsDiscoveryActivity", false, loader);
+            Method lifecycle;
+            try {
+                lifecycle = activity.getDeclaredMethod("onResume");
+            } catch (NoSuchMethodException ignored) {
+                lifecycle = activity.getDeclaredMethod("onCreate", Bundle.class);
+            }
+            hook(lifecycle).intercept(chain -> {
+                OfficialCoreBridge.capture(chain.getThisObject());
+                Object result = chain.proceed();
+                try {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) {
+                        AirPodsController controller = AirPodsController.get(context);
+                        BluetoothDevice device = controller.findBondedAirPods();
+                        if (device != null) controller.ensureBatterySession(device);
+                        controller.setAacpRetries(true);
+                    }
+                } catch (Throwable error) {
+                    Logx.w("discovery battery session failed", error);
+                }
+                return result;
+            });
+            try {
+                Method onPause = activity.getDeclaredMethod("onPause");
+                hook(onPause).intercept(chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Context context = appContext != null ? appContext : currentApplication();
+                        if (context != null) {
+                            AirPodsController.get(context).setAacpRetries(false);
+                        }
+                    } catch (Throwable error) {
+                        Logx.w("discovery battery pause handling failed", error);
+                    }
+                    return result;
+                });
+            } catch (Throwable error) {
+                Logx.w("discovery battery pause hook failed", error);
+            }
+            Logx.i("official AirPods discovery battery hook installed");
+        } catch (Throwable error) {
+            Logx.w("official AirPods discovery battery hook failed", error);
         }
     }
 
@@ -632,6 +729,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             });
             Method onResume = activity.getDeclaredMethod("onResume");
             hook(onResume).intercept(chain -> {
+                OfficialCoreBridge.capture(chain.getThisObject());
                 Object result = chain.proceed();
                 try {
                     attachSettingsDevice(chain.getThisObject());
@@ -743,12 +841,15 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             hook(update).intercept(chain -> {
                 Object target = chain.getThisObject();
                 int[] battery = (int[]) chain.getArg(0);
+                OfficialCoreBridge.capture(target);
                 Object result = chain.proceed();
                 try {
                     Context context = appContext != null ? appContext : currentApplication();
                     if (context != null) {
-                        OfficialBatteryBridge.onOfficialPopup(
-                                target, battery, AirPodsController.get(context));
+                        AirPodsController controller = AirPodsController.get(context);
+                        BluetoothDevice device = controller.findBondedAirPods();
+                        if (device != null) controller.ensureBatterySession(device);
+                        OfficialBatteryBridge.onOfficialPopup(target, battery, controller);
                     }
                 } catch (Throwable error) {
                     Logx.w("official popup battery bridge failed", error);

@@ -5,13 +5,14 @@
 
 ## 当前版本
 
-- 当前版本：`v3.4.44`（`versionCode 78`，本地正式签名构建）
+- 当前版本：`v3.4.45`（`versionCode 79`，本地正式签名构建）
 - 上一 GitHub Release：[v3.4.27-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.27-arm64-v8a)
-- 当前 APK：`OPPO-AirPods-Enhanced-v3.4.44.apk`
-- SHA-256：`3F919AB6AFE5352C83AB7A92DAA5D1CD6B7627DAA4CA39F0FC8C87B64B8D0C0B`
+- 当前 APK：`OPPO-AirPods-Enhanced-v3.4.45.apk`
+- SHA-256：`22F80189B169430A9BF2EF9674BE42B828CD5683B7D6F5597FD3D9624F6D8DBB`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 仅切换到 100 年正式 Release 证书；3.4.29 同步官方弹窗与耳机页；3.4.30 回写官方 DeviceInfo；3.4.31 去掉相同状态去重并优化 AACP 重连功耗；3.4.32 修复双 AACP 会话并补齐控制 TX/回读日志；3.4.33 修复首屏快捷降噪与全屏耳机页的双向同步；3.4.34 持久化设备设置并在重连后恢复，同时让 OPPO 原生与增强页重复开关共享同一状态
+- 3.4.45 修复控制中心磁贴电量不随实际 AACP 电量更新：`:cards` 通过官方 CoreService IPC 把电量快照送入主进程 AirpodsScanPolicy，再由官方 DeviceInfo 刷新控制中心；AACP 只在官方 ACL 连接期间保持，不新增扫描、重连或后台服务。
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE 和头部手势仍需对应真机验收。
 
@@ -55,7 +56,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 `关于`页有完整图例，且每个控件下方都有对应的协议/存储标注。
 
-## Hook 范围：三个进程，28 个 Hook 点
+## Hook 范围：三个进程，32 个 Hook 点
 
 `xposed/scope.list` 只声明三个包，所有增强逻辑都通过 LibXposed 的
 `module.hook(...).intercept(...)` 在官方进程内完成，不使用 `XposedBridge` 直接 Hook，
@@ -63,7 +64,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 | 进程 | Hook 点数 | 职责 |
 | --- | ---: | --- |
-| `com.heytap.mydevices` | 26 | 官方 AirPods 弹窗、扫描/PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
+| `com.heytap.mydevices` | 30 | 官方 AirPods 弹窗、扫描/PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
 | `com.heytap.accessory` | 1 | 被动观察官方 Apple 邻近包，让官方 PTC 唤醒走既有 MyDevices 流程 |
 | `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
@@ -71,7 +72,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 > 因此运行时实际 Hook 的构造器数量可能多于 1；`AirpodsScanHelper.registerPtc()` 仅观察官方注册结果，
 > 不改变官方流程。
 
-### `com.heytap.mydevices`：26 个 Hook 点
+### `com.heytap.mydevices`：30 个 Hook 点
 
 | # | 目标类 / 方法 | 作用 |
 | ---: | --- | --- |
@@ -91,7 +92,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 14 | `androidx.preference.SeekBarPreference` 的单参数 `void` 绑定方法（优先 `Z`，失败按签名回退） | 仅装饰 `SliderRegistry` 标记的模块滑杆，补刻度、轨道与 COUI 卡片样式；Hook 失败不影响滑杆本身的 AACP 控制。 |
 | 15 | `AirpodsSettingActivity.updateFeatureSupport(int)` | 官方刷新后强制展开噪声选择器、空间音频/佩戴检测/对话分组，并设置佩戴检查支持。 |
 | 16 | `AirpodsSettingActivity.onResume()` | 从官方 ViewModel 读取当前 `BluetoothDevice` 并交给控制器，标记设置页已打开。 |
-| 17 | `AirpodsSettingActivity.onDestroy()` | 标记设置页关闭并清理控制器中的页面状态。 |
+| 17 | `AirpodsSettingActivity.onStop()` / `onDestroy()` | 页面离开前台或销毁时标记页面关闭，停止 ATT，并让 AACP 进入后台电量同步模式。 |
 | 18 | `AirpodsSettingActivity.onNoiseControlClick(int)` | 模式 1–4 直接写入 AACP 并更新官方 UI，不再依赖 AirPods 走不通的官方噪声下发路径。 |
 | 19 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 当类型为 `4`（噪声控制）时改走 AACP 设置聆听模式；其他类型继续官方实现。 |
 | 20 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
@@ -100,7 +101,11 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 23 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗。 |
 | 24 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
 | 25 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
-| 26 | `AirpodsScanPolicy.onBatteryLevelChanged(BluetoothDevice, int[])` | 把框架旧电池数组替换为 AACP 快照；这是控制中心 DeviceInfo/设备磁贴的数据上游。 |
++| 26 | `AirpodsScanPolicy.onBatteryLevelChanged(BluetoothDevice, int[])` | 把框架旧电池数组替换为 AACP 快照；这是控制中心 DeviceInfo/设备磁贴的数据上游。 |
+| 27 | `InnerIpcManager` 构造器 | 捕获 `:cards` 进程的官方 IPC 管理器，供 AACP 电量快照走官方 CoreService 通道。 |
+| 28 | `AirpodsManager.process(String, String, Bundle, int)`（按签名回退） | 只识别自定义 `OPODS_AACP_BATTERY_V1`，在核心进程调用官方 `AirpodsScanPolicy.onBatteryLevelChanged`；其他请求原样放行。 |
+| 29 | `AirpodsDiscoveryActivity.onResume()` | 捕获官方 IPC 管理器并在弹窗显示时启动 AACP 电量通道；不替换官方 Activity。 |
+| 30 | `AirpodsDiscoveryActivity.onPause()` | 弹窗隐藏后保留 AACP 电量同步但禁止后台重连；下一次官方弹窗/设置页会重新允许重试。 |
 
 ### `com.heytap.accessory`：1 个 Hook 点
 
@@ -116,7 +121,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 ### 明确不 Hook
 
-- `AirpodsDiscoveryActivity` 本身不 Hook；弹窗仍由官方 PTC/ACL 流程触发并复用官方 Activity。
+- `AirpodsDiscoveryActivity` 只 Hook `onResume()` / `onPause()` 来启动和节流官方 AACP 电量通道；不替换 Activity，也不改变官方 PTC/ACL/弹窗流程。
 - `com.heytap.accessory` 只保留上述 1 个被动 PTC 观察点；Off 帧过滤和 AACP/ATT 仍只在 MyDevices/Bluetooth 中完成，避免重复连接路径。
 - `com.oplus.wirelesssettings`：旧版“蓝牙设置 → 耳机功能”实验路径已删除，当前只使用 MyDevices 官方页。
 - `com.oplus.melody`、Launcher、SystemUI、Settings 和第三方 App：不 Hook。
@@ -128,7 +133,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 - Bluetooth 进程只过滤一个精确帧，其他 socket 写入原样放行。
 - MyDevices 中的 Hook 各自独立 try/catch；一个 Hook 失败不会让模块整体崩溃。
 - 可选装饰 Hook（自适应滑杆样式）失败时，功能仍由 AACP/Dashboard 控制。
-- 连接和弹窗只走官方 PTC/ACL 事件与 `AirpodsDiscoveryActivity`；模块不启动自建 BLE 扫描、主动重连 watchdog 或后台监听进程。
+- 连接和弹窗只走官方 PTC/ACL 事件与 `AirpodsDiscoveryActivity`；AACP 仅在官方 `:cards` 进程内保留一个 daemon socket 线程，ACL 断开即停，页面关闭后禁止重连；不新增 BLE 扫描、watchdog、后台 Service 或独立进程。
 - 不在第三方 App、桌面、通知中心或输入法里注入。
 
 ### OPPO 组件更新后的兼容策略
@@ -165,8 +170,8 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器。
 
 ## 安装
 
-1. 使用本地构建产物安装：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.44.apk`。
-2. 3.4.44 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。LSPosed 作用域由设备使用者重新确认。
+1. 使用本地构建产物安装：`adb install -r dist\OPPO-AirPods-Enhanced-v3.4.45.apk`。
+2. 3.4.45 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。LSPosed 作用域由设备使用者重新确认。
 3. 在 LSPosed 中启用模块，勾选三个作用域：`com.heytap.mydevices`、`com.heytap.accessory`、`com.android.bluetooth`。
 4. 停止 `com.heytap.mydevices`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
 5. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口。
@@ -183,7 +188,7 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 自定义输出：
 
 ```powershell
-.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.44.apk
+.\build.ps1 -Output dist\OPPO-AirPods-Enhanced-v3.4.45.apk
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，读取 AndroidManifest.xml 的版本号并构建

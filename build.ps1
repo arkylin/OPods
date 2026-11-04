@@ -7,7 +7,7 @@ param(
     [string]$KeystorePassword = 'android',
     [string]$KeyAlias = 'androiddebugkey',
     [string]$KeyPassword = 'android',
-    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.44.apk'
+    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.46.apk'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,8 +127,14 @@ $sources = Get-ChildItem -LiteralPath (Join-Path $root 'src') -Recurse -Filter '
 if (-not $sources) { throw 'No Java sources found under src/' }
 
 Write-Host ('Compiling ' + $sources.Count + ' Java files...')
-& javac -encoding UTF-8 -cp ($androidJar + [System.IO.Path]::PathSeparator + $libxposed) -d $classesDir $sources
-if ($LASTEXITCODE -ne 0) { throw 'javac failed' }
+# javac writes deprecation notes to stderr even on success; under $ErrorActionPreference='Stop'
+# that stderr would raise NativeCommandError and abort the build. Gate on the exit code instead.
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+& javac -encoding UTF-8 -cp ($androidJar + [System.IO.Path]::PathSeparator + $libxposed) -d $classesDir $sources 2>&1 | Out-Host
+$javacExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($javacExit -ne 0) { throw 'javac failed' }
 
 $classesJar = Join-Path $buildFull 'classes.jar'
 & jar cf $classesJar -C $classesDir .

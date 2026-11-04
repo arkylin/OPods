@@ -500,8 +500,11 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     synchronized boolean hasBatterySnapshot() {
-        return left >= 0 || right >= 0 || caseLevel >= 0
-                || leftStatus >= 0 || rightStatus >= 0 || caseStatus >= 0;
+        // Require a real battery level. Status alone is not enough: on reset/disconnect the
+        // status fields are set to 4 (the disconnected sentinel), which is >= 0 and would
+        // otherwise make us publish an empty [-1,-1,-1,4,4,4] snapshot over a live tile the
+        // moment the AACP channel opens (before any battery packet arrives).
+        return left >= 0 || right >= 0 || caseLevel >= 0;
     }
 
     BluetoothDevice currentDevice() {
@@ -594,6 +597,9 @@ final class AirPodsController implements AacpSession.Listener {
         CrossProcessState.setSettingsOpen(context, true);
         cancelPendingSessionStop();
         attachDevice(device);
+        AacpSession current = session;
+        if (current != null) current.setAllowRetries(true);
+        if (opened) ensureAttSession();
         notifyChanged();
     }
 
@@ -607,12 +613,32 @@ final class AirPodsController implements AacpSession.Listener {
         panelOpen = true;
         cancelPendingSessionStop();
         attachDevice(device);
+        AacpSession current = session;
+        if (current != null) current.setAllowRetries(true);
+        if (opened) ensureAttSession();
         notifyChanged();
     }
 
     void onPanelClosed() {
         panelOpen = false;
         scheduleSessionStopIfIdle();
+    }
+
+    /** Starts the battery channel when the official popup appears, without marking a page visible. */
+    void ensureBatterySession(BluetoothDevice device) {
+        if (!aacpOwner || device == null) return;
+        if (address == null || !address.equalsIgnoreCase(device.getAddress())) {
+            attachDevice(device);
+        } else {
+            ensureSession();
+        }
+        AacpSession current = session;
+        if (current != null) current.setAllowRetries(false);
+    }
+
+    void setAacpRetries(boolean enabled) {
+        AacpSession current = session;
+        if (current != null) current.setAllowRetries(enabled);
     }
 
     private void cancelPendingSessionStop() {
@@ -624,15 +650,12 @@ final class AirPodsController implements AacpSession.Listener {
     private void scheduleSessionStopIfIdle() {
         cancelPendingSessionStop();
         if (settingsPageOpen || panelOpen) return;
-        Runnable stop = () -> {
-            pendingSessionStop = null;
-            if (!settingsPageOpen && !panelOpen) {
-                Logx.i("official AirPods UI closed; stopping AACP/ATT sessions");
-                stopSession();
-            }
-        };
-        pendingSessionStop = stop;
-        main.postDelayed(stop, 1500L);
+        stopAttSession();
+        AacpSession current = session;
+        if (aacpOwner && current != null) {
+            current.setAllowRetries(false);
+            Logx.i("official AirPods UI closed; keeping AACP battery channel on official ACL");
+        }
     }
 
     void onAclConnected(BluetoothDevice device) {
@@ -645,6 +668,9 @@ final class AirPodsController implements AacpSession.Listener {
 
     void onAclDisconnected(BluetoothDevice device) {
         if (device == null || address.isEmpty() || !address.equalsIgnoreCase(device.getAddress())) return;
+        if (aacpOwner) {
+            OfficialCoreBridge.publish(context, address, new int[]{-1, -1, -1, 4, 4, 4});
+        }
         left = right = caseLevel = -1;
         leftStatus = rightStatus = caseStatus = 4;
         chargingMask = 0;
@@ -874,7 +900,8 @@ final class AirPodsController implements AacpSession.Listener {
         awaitingFirstEvent = true;
         AacpSession current = session;
         Logx.i("AACP ready session=" + (current == null ? -1 : current.sessionId()));
-        ensureAttSession();
+        publishBatterySnapshot();
+        if (settingsPageOpen || panelOpen) ensureAttSession();
         main.postDelayed(this::flushPending, 250L);
         main.postDelayed(this::applyStemConfig, 500L);
         main.postDelayed(this::applySavedControls, 1200L);
@@ -986,12 +1013,37 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     @Override
-    public void onClosed() {
+    public void onClosed(boolean sessionStopping) {
         opened = false;
         awaitingFirstEvent = false;
         stopAttSession();
+        // The AACP socket closing is NOT the same as the earbuds disconnecting. A silent
+        // channel (no ACK within the watchdog window) with retries disabled also arrives here
+        // with sessionStopping=true while the BR/EDR ACL is still up. Only wipe the battery
+        // state and clear the official tile/popup bridges when the link is genuinely down;
+        // otherwise a transient socket recycle would blank a correct charging readout.
+        boolean linkDown = sessionStopping && !isAclConnected();
+        if (linkDown) {
+            Logx.i("AACP official ACL lost; stopping session");
+            stopSession();
+            controls.clear();
+            left = right = caseLevel = -1;
+            leftStatus = rightStatus = caseStatus = 4;
+            chargingMask = 0;
+            wearPrimary = wearSecondary = -1;
+            OfficialBatteryBridge.clear();
+            OfficialDeviceStateBridge.clear(this);
+            notifyChanged();
+            return;
+        }
+        if (sessionStopping) {
+            Logx.i("AACP session stopping but ACL still up; keeping battery snapshot");
+            stopSession();
+            notifyChanged();
+            return;
+        }
         AacpSession current = session;
-        if (current != null && !current.hadData()) {
+        if (current != null && !current.hadData() && !isAclConnected()) {
             controls.clear();
             left = right = caseLevel = -1;
             leftStatus = rightStatus = caseStatus = 4;
@@ -1002,6 +1054,25 @@ final class AirPodsController implements AacpSession.Listener {
             Logx.i("AACP silent snapshot cleared");
         }
         notifyChanged();
+    }
+
+    private boolean isAclConnected() {
+        if (address == null || address.isEmpty()) return false;
+        try {
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null) return false;
+            BluetoothDevice device = adapter.getRemoteDevice(address);
+            Object value = BluetoothDevice.class.getMethod("isConnected").invoke(device);
+            return value instanceof Boolean && (Boolean) value;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void publishBatterySnapshot() {
+        if (!aacpOwner || address == null || address.isEmpty() || !hasBatterySnapshot()) return;
+        OfficialCoreBridge.publish(context, address, officialBatteryArray());
     }
 
     @Override
@@ -1034,6 +1105,7 @@ final class AirPodsController implements AacpSession.Listener {
                 BatteryNotifier.onBattery(this, left, right, caseLevel, chargingMask);
                 OfficialBatteryBridge.schedule(this);
                 OfficialDeviceStateBridge.schedule(this);
+                publishBatterySnapshot();
                 break;
             case AacpProtocol.Event.TYPE_CONTROL:
                 int[] previousControl = controls.put(event.controlId, event.values);
@@ -1053,6 +1125,7 @@ final class AirPodsController implements AacpSession.Listener {
                 EarPlaybackController.onWearChanged(this, previous, inEarCount());
                 OfficialBatteryBridge.schedule(this);
                 OfficialDeviceStateBridge.schedule(this);
+                publishBatterySnapshot();
                 break;
             case AacpProtocol.Event.TYPE_INFO:
                 if (event.name != null && !event.name.isEmpty()) modelName = event.name;
@@ -1069,7 +1142,7 @@ final class AirPodsController implements AacpSession.Listener {
                 if (event.updaterIdentifier != null && !event.updaterIdentifier.isEmpty()) updaterIdentifier = event.updaterIdentifier;
                 AirPodsModels.Model model = AirPodsModels.fromModelNumber(modelNumber);
                 if (model != null) modelName = model.name;
-                ensureAttSession();
+                if (settingsPageOpen || panelOpen) ensureAttSession();
                 break;
             case AacpProtocol.Event.TYPE_EQUALIZER:
                 controls.put(AacpProtocol.OP_EQUALIZER, new int[]{event.eqState, event.eqLow, event.eqMid, event.eqHigh});

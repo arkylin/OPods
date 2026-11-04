@@ -2,6 +2,7 @@ package io.github.oppoairpods.popup;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Process;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -14,7 +15,11 @@ final class CrossProcessState {
     private static final String AUTO_CONNECT = "auto_connect";
     private static final String SETTINGS_OPEN = "settings_open";
     private static final String SETTINGS_OPEN_AT = "settings_open_at";
+    private static final String BATTERY = "battery";
+    private static final String BATTERY_ADDRESS = "battery_address";
+    private static final String BATTERY_AT = "battery_at";
     private static final long SETTINGS_VISIBLE_MS = 10L * 60L * 1000L;
+    private static final long BATTERY_VISIBLE_MS = 12L * 60L * 60L * 1000L;
     private static final Object LOCK = new Object();
 
     private CrossProcessState() {}
@@ -53,6 +58,68 @@ final class CrossProcessState {
         }
     }
 
+    static void setBattery(Context context, String address, int[] battery) {
+        if (address == null || address.isEmpty() || battery == null || battery.length < 6) return;
+        synchronized (LOCK) {
+            Properties values = load(context);
+            values.setProperty(BATTERY_ADDRESS, address);
+            values.setProperty(BATTERY, battery[0] + "," + battery[1] + "," + battery[2]
+                    + "," + battery[3] + "," + battery[4] + "," + battery[5]);
+            values.setProperty(BATTERY_AT, String.valueOf(System.currentTimeMillis()));
+            save(context, values);
+        }
+    }
+
+    static String batteryAddress(Context context) {
+        return read(context, BATTERY_ADDRESS);
+    }
+
+    static int[] battery(Context context) {
+        synchronized (LOCK) {
+            Properties values = load(context);
+            String value = values.getProperty(BATTERY);
+            String timestamp = values.getProperty(BATTERY_AT);
+            if (value == null || value.isEmpty() || timestamp == null) return null;
+            try {
+                if (System.currentTimeMillis() - Long.parseLong(timestamp) >= BATTERY_VISIBLE_MS) {
+                    return null;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+            String[] parts = value.split(",");
+            if (parts.length != 6) return null;
+            int[] parsed = new int[6];
+            try {
+                for (int index = 0; index < parsed.length; index++) {
+                    parsed[index] = Integer.parseInt(parts[index]);
+                }
+                return parsed;
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+    }
+
+    static String batteryPayload(Context context) {
+        synchronized (LOCK) {
+            Properties values = load(context);
+            String value = values.getProperty(BATTERY);
+            String address = values.getProperty(BATTERY_ADDRESS);
+            String timestamp = values.getProperty(BATTERY_AT);
+            if (value == null || value.isEmpty() || address == null || address.isEmpty()
+                    || timestamp == null) return null;
+            try {
+                if (System.currentTimeMillis() - Long.parseLong(timestamp) >= BATTERY_VISIBLE_MS) {
+                    return null;
+                }
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+            return address + "|" + value;
+        }
+    }
+
     private static String read(Context context, String key) {
         synchronized (LOCK) {
             return load(context).getProperty(key);
@@ -79,10 +146,21 @@ final class CrossProcessState {
     }
 
     private static void save(Context context, Properties values) {
-        try (FileOutputStream output = new FileOutputStream(file(context), false)) {
+        File target = file(context);
+        File temp = new File(target.getParentFile(), FILE_NAME + "." + Process.myPid() + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temp, false)) {
             values.store(output, null);
+            output.getFD().sync();
         } catch (Throwable error) {
             Logx.w("cross-process state write failed", error);
+            return;
+        }
+        if (!temp.renameTo(target)) {
+            try (FileOutputStream output = new FileOutputStream(target, false)) {
+                values.store(output, null);
+            } catch (Throwable error) {
+                Logx.w("cross-process state replace failed", error);
+            }
         }
     }
 

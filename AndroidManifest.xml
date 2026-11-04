@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.oppoairpods.popup" android:versionCode="78" android:versionName="3.4.44">
+    package="io.github.oppoairpods.popup" android:versionCode="80" android:versionName="3.4.46">
     <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="37" />
     <application
         android:label="@string/app_name"

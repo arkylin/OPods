@@ -40,6 +40,7 @@ final class QuickNoiseInjector {
         View selector = findByClass(root, SELECTOR_CLASS);
         if (selector == null) return;
         Context context = selector.getContext();
+        OfficialCoreBridge.capture(fragment);
         AirPodsController controller = AirPodsController.get(context);
         BluetoothDevice device = controller.findBondedAirPods();
         if (device == null || !controller.isAirPods(device)) return;
