@@ -7,11 +7,14 @@ import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.util.TypedValue;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -35,6 +38,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     private static final String MYDEVICES = "com.heytap.mydevices";
     private static final String BLUETOOTH = "com.android.bluetooth";
     private static final String ACCESSORY = "com.heytap.accessory";
+    private static final String COUI_SLIDER_TAG = "opods_coui_slider_card";
     private static final Object INSTALL_LOCK = new Object();
     private static boolean myDevicesHooksInstalled;
     private static boolean aapOffFilterInstalled;
@@ -504,44 +508,64 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         if (value instanceof SeekBar) {
                             SeekBar bar = (SeekBar) value;
                             float density = bar.getResources().getDisplayMetrics().density;
-                            int radius = Math.max(2, Math.round(density * 2.0f));
-                            int trackHeight = Math.max(6, Math.round(density * 9.0f));
-                            bar.setBackground(new SliderTickDrawable(bar, radius, trackHeight));
+                            bar.setBackground(new SliderTickDrawable(bar, density));
                             bar.setProgressDrawable(new ColorDrawable(Color.TRANSPARENT));
-                            GradientDrawable thumb = new GradientDrawable();
-                            thumb.setShape(GradientDrawable.OVAL);
-                            thumb.setColor(Color.WHITE);
-                            thumb.setStroke(Math.max(2, Math.round(density * 2.0f)), 0xFF3478F6);
-                            int thumbSize = Math.round(density * 20.0f);
-                            thumb.setSize(thumbSize, thumbSize);
-                            bar.setThumb(thumb);
+                            bar.setThumb(new CouiSliderThumbDrawable(density));
+                            bar.setThumbOffset(0);
+                            int sidePadding = Math.round(density * 2.0f);
+                            bar.setPadding(sidePadding, 0, sidePadding, 0);
                             bar.setKeyProgressIncrement(25);
                             bar.setSplitTrack(false);
                             Object holder = chain.getArg(0);
                             View item = (View) holder.getClass().getField("itemView").get(holder);
+                            boolean needsWrap = !COUI_SLIDER_TAG.equals(item.getTag());
                             GradientDrawable card = new GradientDrawable();
                             card.setColor(Color.WHITE);
                             card.setCornerRadius(density * 24.0f);
-                            item.setBackground(card);
-                            int top = Math.round(density * 12.0f);
-                            int bottom = Math.round(density * 16.0f);
-                            item.setPadding(0, top, 0, bottom);
-                            if (bar.getParent() != null && bar.getParent().getParent() instanceof View) {
-                                final View content = (View) bar.getParent().getParent();
-                                final int inset = Math.round(density * 24.0f);
-                                item.post(() -> {
-                                    int targetWidth = item.getWidth() - inset * 2;
-                                    if (targetWidth <= 0) return;
-                                    ViewGroup.LayoutParams params = content.getLayoutParams();
-                                    params.width = targetWidth;
-                                    content.setLayoutParams(params);
-                                    item.post(() -> content.setTranslationX(inset - content.getLeft()));
-                                });
+                            if (needsWrap) {
+                                item.setBackground(null);
+                                item.setPadding(0, 0, 0, 0);
+                                View content = (View) bar.getParent().getParent();
+                                if (content.getParent() instanceof LinearLayout) {
+                                    LinearLayout cardHolder = (LinearLayout) content.getParent();
+                                    cardHolder.removeAllViews();
+                                    cardHolder.setOrientation(LinearLayout.VERTICAL);
+                                    cardHolder.setClipChildren(false);
+                                    cardHolder.setClipToPadding(false);
+                                    LinearLayout cardView = new LinearLayout(bar.getContext());
+                                    cardView.setOrientation(LinearLayout.VERTICAL);
+                                    cardView.setBackground(card);
+                                    int horizontal = Math.round(density * 16.0f);
+                                    int vertical = Math.round(density * 5.0f);
+                                    cardView.setPadding(horizontal, vertical, horizontal, vertical);
+                                    cardView.addView(content, new LinearLayout.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.WRAP_CONTENT));
+                                    LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.WRAP_CONTENT);
+                                    cardParams.setMargins(horizontal, 0, horizontal, 0);
+                                    cardHolder.addView(cardView, cardParams);
+                                    item.setTag(COUI_SLIDER_TAG);
+                                }
                             }
+                            item.setTranslationY(-density * 12.0f);
 
                             View title = item.findViewById(android.R.id.title);
                             Field valueField = findField(seekPreference, TextView.class);
                             Object valueView = valueField.get(preference);
+                            if (title instanceof TextView) {
+                                TextView titleText = (TextView) title;
+                                titleText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f);
+                                titleText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                                titleText.setTextColor(Color.BLACK);
+                            }
+                            if (valueView instanceof TextView) {
+                                TextView valueText = (TextView) valueView;
+                                valueText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f);
+                                valueText.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+                                valueText.setTextColor(0xFF7A7E85);
+                            }
                             if (title != null && valueView instanceof View
                                     && title.getParent() instanceof RelativeLayout
                                     && ((View) valueView).getParent() instanceof ViewGroup) {
@@ -551,8 +575,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                                 titleRow.setLayoutParams(rowParams);
                                 View valueText = (View) valueView;
                                 ((ViewGroup) valueText.getParent()).removeView(valueText);
-                                int rowPadding = Math.round(density * 4.0f);
-                                titleRow.setPadding(rowPadding, 0, rowPadding, 0);
+                                titleRow.setPadding(0, 0, 0, 0);
                                 RelativeLayout.LayoutParams valueParams = new RelativeLayout.LayoutParams(
                                         ViewGroup.LayoutParams.WRAP_CONTENT,
                                         ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -564,16 +587,21 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                                 View sliderRow = (View) bar.getParent();
                                 ViewGroup.LayoutParams rowParams = sliderRow.getLayoutParams();
                                 rowParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                                if (rowParams instanceof LinearLayout.LayoutParams) {
+                                    ((LinearLayout.LayoutParams) rowParams).topMargin =
+                                            Math.round(density * 6.0f);
+                                }
                                 sliderRow.setLayoutParams(rowParams);
                                 sliderRow.setPadding(0, sliderRow.getPaddingTop(),
                                         0, sliderRow.getPaddingBottom());
                                 ViewGroup.LayoutParams barParams = bar.getLayoutParams();
                                 barParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                                barParams.height = Math.round(density * 32.0f);
+                                barParams.height = Math.round(density * 28.0f);
                                 bar.setLayoutParams(barParams);
-                                bar.setPadding(0, bar.getPaddingTop(), 0, bar.getPaddingBottom());
+                                bar.setPadding(sidePadding, bar.getPaddingTop(),
+                                        sidePadding, bar.getPaddingBottom());
                             }
-                            Logx.i("adaptive slider tick marks installed");
+                            if (needsWrap) Logx.i("COUI slider installed");
                         }
                     }
                 } catch (Throwable error) {

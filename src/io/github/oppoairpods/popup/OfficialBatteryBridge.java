@@ -64,9 +64,20 @@ final class OfficialBatteryBridge {
         });
     }
 
+    static void clear() {
+        if (!SCHEDULED.compareAndSet(false, true)) return;
+        MAIN.post(() -> {
+            SCHEDULED.set(false);
+            applyBattery(new int[]{-1, -1, -1, 4, 4, 4});
+        });
+    }
+
     private static void apply(AirPodsController controller) {
         if (!controller.hasBatterySnapshot()) return;
-        int[] battery = controller.officialBatteryArray();
+        applyBattery(controller.officialBatteryArray());
+    }
+
+    private static void applyBattery(int[] battery) {
         APPLYING.set(true);
         try {
             Object popupTarget = popup.get();

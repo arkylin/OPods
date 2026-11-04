@@ -34,18 +34,28 @@ final class OfficialDeviceStateBridge {
 
     static void schedule(AirPodsController controller) {
         if (controller == null || APPLYING.get() || !controller.hasBatterySnapshot()) return;
+        schedule(controller, false);
+    }
+
+    static void clear(AirPodsController controller) {
+        if (controller == null || APPLYING.get()) return;
+        schedule(controller, true);
+    }
+
+    private static void schedule(AirPodsController controller, boolean clear) {
         if (!SCHEDULED.compareAndSet(false, true)) return;
         MAIN.post(() -> {
             SCHEDULED.set(false);
-            apply(controller);
+            apply(controller, clear);
         });
     }
 
-    private static void apply(AirPodsController controller) {
+    private static void apply(AirPodsController controller, boolean clear) {
         Object target = policy.get();
         BluetoothDevice device = controller.currentDevice();
-        if (target == null || device == null || !controller.hasBatterySnapshot()) return;
-        int[] battery = controller.officialBatteryArray();
+        if (target == null || device == null || (!clear && !controller.hasBatterySnapshot())) return;
+        int[] battery = clear ? new int[]{-1, -1, -1, 4, 4, 4}
+                : controller.officialBatteryArray();
         String compact = Arrays.toString(battery);
         APPLYING.set(true);
         try {

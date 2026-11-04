@@ -1,12 +1,9 @@
 package io.github.oppoairpods.popup;
 
 import android.app.Application;
-import android.bluetooth.BluetoothA2dp;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothHeadset;
 import android.bluetooth.BluetoothManager;
-import android.bluetooth.BluetoothProfile;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -104,7 +101,10 @@ final class AirPodsController implements AacpSession.Listener {
     private volatile AacpSession session;
     private volatile boolean pausedByEar;
     private volatile boolean opened;
+    private volatile boolean awaitingFirstEvent;
     private volatile boolean settingsPageOpen;
+    private volatile boolean panelOpen;
+    private Runnable pendingSessionStop;
     private volatile String manufacturer;
     private volatile String serialNumber;
     private volatile String leftSerialNumber;
@@ -163,7 +163,7 @@ final class AirPodsController implements AacpSession.Listener {
         return context;
     }
     boolean autoConnect() {
-        return prefs.getBoolean("auto_connect", true);
+        return CrossProcessState.autoConnect(context);
     }
 
     boolean earPlayback() {
@@ -175,7 +175,7 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     void setAutoConnect(boolean value) {
-        prefs.edit().putBoolean("auto_connect", value).apply();
+        CrossProcessState.setAutoConnect(context, value);
     }
 
     void setEarPlayback(boolean value) {
@@ -591,12 +591,48 @@ final class AirPodsController implements AacpSession.Listener {
 
     void onSettingsPageOpened(BluetoothDevice device) {
         settingsPageOpen = true;
+        CrossProcessState.setSettingsOpen(context, true);
+        cancelPendingSessionStop();
         attachDevice(device);
         notifyChanged();
     }
 
     void onSettingsPageClosed() {
         settingsPageOpen = false;
+        CrossProcessState.setSettingsOpen(context, false);
+        scheduleSessionStopIfIdle();
+    }
+
+    void onPanelOpened(BluetoothDevice device) {
+        panelOpen = true;
+        cancelPendingSessionStop();
+        attachDevice(device);
+        notifyChanged();
+    }
+
+    void onPanelClosed() {
+        panelOpen = false;
+        scheduleSessionStopIfIdle();
+    }
+
+    private void cancelPendingSessionStop() {
+        Runnable pending = pendingSessionStop;
+        pendingSessionStop = null;
+        if (pending != null) main.removeCallbacks(pending);
+    }
+
+    private void scheduleSessionStopIfIdle() {
+        cancelPendingSessionStop();
+        if (settingsPageOpen || panelOpen) return;
+        Runnable stop = () -> {
+            pendingSessionStop = null;
+            if (!settingsPageOpen && !panelOpen) {
+                Logx.i("official AirPods UI closed; stopping AACP/ATT sessions");
+                stopSession();
+            }
+        };
+        pendingSessionStop = stop;
+        main.postDelayed(stop, 1500L);
     }
 
     void onAclConnected(BluetoothDevice device) {
@@ -604,7 +640,7 @@ final class AirPodsController implements AacpSession.Listener {
         boolean hadAddress = !address.isEmpty() && address.equalsIgnoreCase(device.getAddress());
         attachDevice(device);
         Logx.i("AirPods link connected; controller address refreshed");
-        scheduleConnectAndPopup(device, hadAddress ? 250L : 0L);
+        scheduleOfficialPopup(device, hadAddress ? 250L : 0L);
     }
 
     void onAclDisconnected(BluetoothDevice device) {
@@ -622,6 +658,10 @@ final class AirPodsController implements AacpSession.Listener {
 
     void onCaseAdvertisement(BluetoothDevice device, String model, boolean lidOpen) {
         if (!lidOpen) return;
+        if (!autoConnect()) {
+            Logx.i("case-open ignored because auto-connect is disabled");
+            return;
+        }
         long now = System.currentTimeMillis();
         if (now - lastCaseAt < 4500L) return;
         lastCaseAt = now;
@@ -630,29 +670,21 @@ final class AirPodsController implements AacpSession.Listener {
         if (device == null) return;
         if (model != null && !model.isEmpty()) modelName = AirPodsModels.displayName(null, model);
         Logx.i("Case-open advertisement for " + modelName);
-        scheduleConnectAndPopup(device, 0);
+        scheduleOfficialPopup(device, 0);
     }
 
-    private void scheduleConnectAndPopup(BluetoothDevice device, long delayMs) {
+    private void scheduleOfficialPopup(BluetoothDevice device, long delayMs) {
         main.postDelayed(() -> {
             try {
-                if (autoConnect()) connectProfiles(device);
                 launchOfficialPopup(device);
             } catch (Throwable error) {
                 Logx.w("case-open handling failed", error);
             }
         }, delayMs);
-        // A headset held by an iPhone may accept the audio profiles a moment later.
-        main.postDelayed(() -> {
-            if (autoConnect() && !isAudioConnected(device)) connectProfiles(device);
-        }, 1800L);
-        main.postDelayed(() -> {
-            if (autoConnect() && !isAudioConnected(device)) connectProfiles(device);
-        }, 4200L);
     }
 
     void launchOfficialPopup(BluetoothDevice device) {
-        if (settingsPageOpen) return;
+        if (settingsPageOpen || CrossProcessState.settingsOpen(context)) return;
         long now = System.currentTimeMillis();
         if (now - lastPopupAt < 3500L) return;
         lastPopupAt = now;
@@ -668,91 +700,6 @@ final class AirPodsController implements AacpSession.Listener {
         } catch (Throwable error) {
             Logx.w("official popup failed", error);
         }
-    }
-
-    void connectProfiles(BluetoothDevice device) {
-        BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        if (adapter == null || !adapter.isEnabled() || device == null) return;
-        requestProfile(adapter, device, BluetoothProfile.A2DP);
-        requestProfile(adapter, device, BluetoothProfile.HEADSET);
-    }
-
-    private void requestProfile(BluetoothAdapter adapter, BluetoothDevice device, int profile) {
-        try {
-            boolean requested = adapter.getProfileProxy(context, new BluetoothProfile.ServiceListener() {
-                @Override
-                public void onServiceConnected(int connectedProfile, BluetoothProfile proxy) {
-                    if (connectedProfile != profile) return;
-                    try {
-                        if (proxy.getConnectionState(device) == BluetoothProfile.STATE_CONNECTED) return;
-                        try {
-                            Method policy = proxy.getClass().getMethod("setConnectionPolicy", BluetoothDevice.class, int.class);
-                            policy.invoke(proxy, device, 100);
-                        } catch (Throwable ignored) {
-                        }
-                        Method connect = proxy.getClass().getMethod("connect", BluetoothDevice.class);
-                        connect.invoke(proxy, device);
-                        Logx.i("requested profile " + profile + " connect");
-                    } catch (Throwable error) {
-                        Logx.w("profile " + profile + " connect failed", error);
-                    } finally {
-                        try {
-                            adapter.closeProfileProxy(profile, proxy);
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
-
-                @Override
-                public void onServiceDisconnected(int disconnectedProfile) {
-                }
-            }, profile);
-            if (!requested) Logx.w("profile proxy unavailable: " + profile, null);
-        } catch (Throwable error) {
-            Logx.w("profile proxy request failed", error);
-        }
-    }
-
-    boolean isAudioConnected(BluetoothDevice device) {
-        BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
-        BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
-        if (adapter == null || device == null) return false;
-        for (int profile : new int[]{BluetoothProfile.A2DP, BluetoothProfile.HEADSET}) {
-            final boolean[] connected = {false};
-            final Object lock = new Object();
-            try {
-                adapter.getProfileProxy(context, new BluetoothProfile.ServiceListener() {
-                    @Override
-                    public void onServiceConnected(int connectedProfile, BluetoothProfile proxy) {
-                        try {
-                            connected[0] = proxy.getConnectionState(device) == BluetoothProfile.STATE_CONNECTED;
-                        } finally {
-                            synchronized (lock) {
-                                lock.notifyAll();
-                            }
-                            try {
-                                adapter.closeProfileProxy(profile, proxy);
-                            } catch (Throwable ignored) {
-                            }
-                        }
-                    }
-
-                    @Override
-                    public void onServiceDisconnected(int disconnectedProfile) {
-                        synchronized (lock) {
-                            lock.notifyAll();
-                        }
-                    }
-                }, profile);
-                synchronized (lock) {
-                    lock.wait(350L);
-                }
-            } catch (Throwable ignored) {
-            }
-            if (connected[0]) return true;
-        }
-        return false;
     }
 
     BluetoothDevice findBondedAirPods() {
@@ -814,6 +761,8 @@ final class AirPodsController implements AacpSession.Listener {
             session = null;
             if (current != null) current.stop();
         }
+        opened = false;
+        awaitingFirstEvent = false;
         stopAttSession();
     }
 
@@ -874,14 +823,14 @@ final class AirPodsController implements AacpSession.Listener {
     boolean sendControl(int id, int... values) {
         if (!restoringControls && isRestorableControl(id)) persistControl(id, values);
         AacpSession current = session;
-        if (current != null && current.sendControl(id, values)) {
+        if (current != null && current.ready() && current.sendControl(id, values)) {
             Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
                     + Arrays.toString(values) + " via #" + current.sessionId());
             return true;
         }
         ensureSession();
         current = session;
-        if (current != null && current.sendControl(id, values)) {
+        if (current != null && current.ready() && current.sendControl(id, values)) {
             Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
                     + Arrays.toString(values) + " via #" + current.sessionId());
             return true;
@@ -908,10 +857,12 @@ final class AirPodsController implements AacpSession.Listener {
     boolean sendEqualizer(int enabled, int low, int mid, int high) {
         persistEqualizer(enabled, low, mid, high);
         AacpSession current = session;
-        if (current != null && current.sendEqualizer(enabled, low, mid, high)) return true;
+        if (current != null && current.ready()
+                && current.sendEqualizer(enabled, low, mid, high)) return true;
         ensureSession();
         current = session;
-        if (current != null && current.sendEqualizer(enabled, low, mid, high)) return true;
+        if (current != null && current.ready()
+                && current.sendEqualizer(enabled, low, mid, high)) return true;
         if (!aacpOwner) return false;
         pendingEqualizer = new int[]{enabled, low, mid, high};
         return true;
@@ -920,6 +871,7 @@ final class AirPodsController implements AacpSession.Listener {
     @Override
     public void onOpened() {
         opened = true;
+        awaitingFirstEvent = true;
         AacpSession current = session;
         Logx.i("AACP ready session=" + (current == null ? -1 : current.sessionId()));
         ensureAttSession();
@@ -983,7 +935,7 @@ final class AirPodsController implements AacpSession.Listener {
     private void applySavedControls() {
         if (!opened || !aacpOwner) return;
         AacpSession current = session;
-        if (current == null) return;
+        if (current == null || !current.ready()) return;
         restoringControls = true;
         try {
             for (int id : RESTORABLE_CONTROLS) {
@@ -1008,7 +960,7 @@ final class AirPodsController implements AacpSession.Listener {
 
     private void flushPending() {
         AacpSession current = session;
-        if (current == null) return;
+        if (current == null || !current.ready()) return;
         synchronized (pendingControls) {
             int[] next;
             while ((next = pendingControls.pollFirst()) != null) {
@@ -1036,13 +988,31 @@ final class AirPodsController implements AacpSession.Listener {
     @Override
     public void onClosed() {
         opened = false;
+        awaitingFirstEvent = false;
         stopAttSession();
+        AacpSession current = session;
+        if (current != null && !current.hadData()) {
+            controls.clear();
+            left = right = caseLevel = -1;
+            leftStatus = rightStatus = caseStatus = 4;
+            chargingMask = 0;
+            wearPrimary = wearSecondary = -1;
+            OfficialBatteryBridge.clear();
+            OfficialDeviceStateBridge.clear(this);
+            Logx.i("AACP silent snapshot cleared");
+        }
         notifyChanged();
     }
 
     @Override
     public void onEvent(AacpProtocol.Event event) {
         if (event == null) return;
+        if (awaitingFirstEvent) {
+            awaitingFirstEvent = false;
+            Logx.i("AACP first device event received");
+            main.postDelayed(this::flushPending, 50L);
+            main.postDelayed(this::applySavedControls, 350L);
+        }
         switch (event.type) {
             case AacpProtocol.Event.TYPE_BATTERY:
                 if (event.leftStatus >= 0) {
@@ -1099,6 +1069,7 @@ final class AirPodsController implements AacpSession.Listener {
                 if (event.updaterIdentifier != null && !event.updaterIdentifier.isEmpty()) updaterIdentifier = event.updaterIdentifier;
                 AirPodsModels.Model model = AirPodsModels.fromModelNumber(modelNumber);
                 if (model != null) modelName = model.name;
+                ensureAttSession();
                 break;
             case AacpProtocol.Event.TYPE_EQUALIZER:
                 controls.put(AacpProtocol.OP_EQUALIZER, new int[]{event.eqState, event.eqLow, event.eqMid, event.eqHigh});

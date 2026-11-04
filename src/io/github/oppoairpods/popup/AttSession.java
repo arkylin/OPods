@@ -50,6 +50,7 @@ final class AttSession {
     private volatile BluetoothSocket socket;
     private volatile Thread reader;
     private volatile boolean connected;
+    private volatile long lastReceiveAt;
 
     AttSession(Context context, String address, Listener listener) {
         this.context = context.getApplicationContext() == null ? context : context.getApplicationContext();
@@ -140,10 +141,29 @@ final class AttSession {
         }
         BluetoothSocket channel = AacpSession.createSocket(adapter, device, PSM, APPLE_ATT_UUID);
         socket = channel;
-        channel.connect();
+        Thread connectTimeout = new Thread(() -> {
+            try {
+                Thread.sleep(8000L);
+                if (socket == channel && !connected) {
+                    Logx.w("ATT connect timeout; recycling", null);
+                    closeSocket();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }, "OPPO-AirPods-ATT-connect-timeout");
+        connectTimeout.setDaemon(true);
+        connectTimeout.start();
+        try {
+            channel.connect();
+        } finally {
+            connectTimeout.interrupt();
+        }
         if (!running.get()) return;
+        lastReceiveAt = 0L;
         connected = true;
         listener.onAttConnected();
+        startSilenceWatchdog(channel);
         InputStream input = channel.getInputStream();
         requests.execute(() -> {
             try {
@@ -169,6 +189,7 @@ final class AttSession {
 
     private void handlePdu(byte[] pdu) {
         if (pdu.length < 1) return;
+        lastReceiveAt = System.currentTimeMillis();
         int opcode = pdu[0] & 0xFF;
         if (opcode == 0x1B && pdu.length >= 3) {
             int handle = (pdu[1] & 0xFF) | ((pdu[2] & 0xFF) << 8);
@@ -179,6 +200,22 @@ final class AttSession {
             return;
         }
         queue(opcode).offer(pdu);
+    }
+
+    private void startSilenceWatchdog(BluetoothSocket channel) {
+        Thread watchdog = new Thread(() -> {
+            try {
+                Thread.sleep(8000L);
+                if (running.get() && socket == channel && lastReceiveAt == 0L) {
+                    Logx.w("ATT channel silent; recycling", null);
+                    closeSocket();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }, "OPPO-AirPods-ATT-silence");
+        watchdog.setDaemon(true);
+        watchdog.start();
     }
 
     private void readHandle(int handle, ValueConsumer consumer) {

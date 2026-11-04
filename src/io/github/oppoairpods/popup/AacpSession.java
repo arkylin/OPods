@@ -38,6 +38,7 @@ final class AacpSession {
     private final Object writeLock = new Object();
     private volatile BluetoothSocket socket;
     private volatile Thread thread;
+    private volatile long lastReceiveAt;
 
     AacpSession(Context context, String address, Listener listener) {
         this.context = context.getApplicationContext() == null ? context : context.getApplicationContext();
@@ -62,6 +63,14 @@ final class AacpSession {
 
     boolean isRunning() {
         return running.get();
+    }
+
+    boolean ready() {
+        return running.get() && socket != null && lastReceiveAt > 0L;
+    }
+
+    boolean hadData() {
+        return lastReceiveAt > 0L;
     }
 
     int sessionId() {
@@ -144,6 +153,7 @@ final class AacpSession {
             return;
         }
         BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
+        lastReceiveAt = 0L;
         socket = channel;
         Thread watchdog = new Thread(() -> {
             try {
@@ -164,6 +174,7 @@ final class AacpSession {
         listener.onOpened();
         Logx.i("AACP channel #" + sessionId + " opened");
         scheduleInitializationRetry(channel);
+        startSilenceWatchdog(channel);
         AacpProtocol.Framer framer = new AacpProtocol.Framer();
         InputStream input = channel.getInputStream();
         byte[] buffer = new byte[8192];
@@ -174,13 +185,19 @@ final class AacpSession {
             logIncoming(raw);
             if (AacpProtocol.isHeadTracking(raw)) {
                 AacpProtocol.Event head = AacpProtocol.parse(raw);
-                if (head != null) listener.onEvent(head);
+                if (head != null) {
+                    lastReceiveAt = System.currentTimeMillis();
+                    listener.onEvent(head);
+                }
                 continue;
             }
             List<byte[]> packets = framer.feed(raw);
             for (byte[] packet : packets) {
                 AacpProtocol.Event event = AacpProtocol.parse(packet);
-                if (event != null) listener.onEvent(event);
+                if (event != null) {
+                    lastReceiveAt = System.currentTimeMillis();
+                    listener.onEvent(event);
+                }
             }
         }
     }
@@ -219,6 +236,22 @@ final class AacpSession {
         }, "OPPO-AirPods-AACP-init");
         retry.setDaemon(true);
         retry.start();
+    }
+
+    private void startSilenceWatchdog(BluetoothSocket channel) {
+        Thread watchdog = new Thread(() -> {
+            try {
+                Thread.sleep(6500L);
+                if (running.get() && socket == channel && lastReceiveAt == 0L) {
+                    Logx.w("AACP channel #" + sessionId + " silent; recycling", null);
+                    closeSocket();
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }, "OPPO-AirPods-AACP-silence");
+        watchdog.setDaemon(true);
+        watchdog.start();
     }
 
     private void logIncoming(byte[] data) {

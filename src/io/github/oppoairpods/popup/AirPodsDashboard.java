@@ -951,6 +951,7 @@ final class AirPodsDashboard {
         paragraph(sources, "LibrePods v1.0.4：AACP 行为、能力表、ATT 通透/助听数据结构和功能范围参考；GPL-3.0。");
         paragraph(sources, "HyperPods-X：HyperOS 原生弹窗、官方设置注入与 AACP 思路参考；GPL-3.0。");
         paragraph(sources, "airpods-off-fix：ColorOS Off 帧和能力位行为参考；该提交未附明确许可文件，本项目只使用公开协议事实并独立实现。");
+        paragraph(sources, "COUI：Slider 的轨道、滑块、关键点、按压动画和配色参数参考；Apache-2.0，本项目使用 Android SeekBar 与 Drawable 独立重实现。");
         paragraph(sources, "LibXposed API：编译期 LSPosed API，Apache-2.0。详细说明见 README 和 THIRD_PARTY.md。");
 
         LinearLayout disclaimer = ui.section(content, "免责声明");

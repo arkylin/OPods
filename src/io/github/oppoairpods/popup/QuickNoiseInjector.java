@@ -43,7 +43,7 @@ final class QuickNoiseInjector {
         AirPodsController controller = AirPodsController.get(context);
         BluetoothDevice device = controller.findBondedAirPods();
         if (device == null || !controller.isAirPods(device)) return;
-        controller.attachDevice(device);
+        controller.onPanelOpened(device);
         try {
             ClassLoader loader = fragment.getClass().getClassLoader();
             Class<?> selectorClass = Class.forName(SELECTOR_SETTINGS_CLASS, false, loader);
@@ -199,6 +199,7 @@ final class QuickNoiseInjector {
 
         void release() {
             controller.removeListener(this);
+            controller.onPanelClosed();
         }
 
         void show() {
