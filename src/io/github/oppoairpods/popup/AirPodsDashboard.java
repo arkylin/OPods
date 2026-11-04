@@ -221,7 +221,7 @@ final class AirPodsDashboard {
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_ADAPTIVE_VOLUME),
                 controller.controlOn(AacpProtocol.CONTROL_ADAPTIVE_VOLUME), true,
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_ADAPTIVE_VOLUME, checked)));
-        specs.add(new DashboardUi.ToggleSpec("对话感知", "说话时降低媒体音量",
+        specs.add(new DashboardUi.ToggleSpec("对话感知", "与 OPPO 原生开关同步 · AACP 0x28",
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_CONVERSATION),
                 controller.controlOn(AacpProtocol.CONTROL_CONVERSATION), true,
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_CONVERSATION, checked)));
@@ -546,7 +546,7 @@ final class AirPodsDashboard {
         LinearLayout wear = ui.section(content, "佩戴与连接");
         ui.cardTitle(wear, "佩戴检测", "自动人耳检测与本地入耳播放可以独立开关");
         List<DashboardUi.ToggleSpec> wearSpecs = new ArrayList<>();
-        wearSpecs.add(new DashboardUi.ToggleSpec("自动人耳检测", "AACP 0x0A",
+        wearSpecs.add(new DashboardUi.ToggleSpec("自动人耳检测", "与 OPPO 原生『佩戴检测』同步 · AACP 0x0A",
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_EAR_DETECTION),
                 controller.controlOn(AacpProtocol.CONTROL_EAR_DETECTION), true,
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_EAR_DETECTION, checked)));

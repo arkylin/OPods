@@ -58,6 +58,33 @@ final class AirPodsController implements AacpSession.Listener {
     private final Object sessionLock = new Object();
     private final ArrayDeque<int[]> pendingControls = new ArrayDeque<>();
     private volatile int[] pendingEqualizer;
+    private volatile boolean restoringControls;
+
+    private static final int[] RESTORABLE_CONTROLS = {
+            AacpProtocol.CONTROL_MICROPHONE,
+            AacpProtocol.CONTROL_EAR_DETECTION,
+            AacpProtocol.CONTROL_PRESS_SPEED,
+            AacpProtocol.CONTROL_PRESS_HOLD,
+            AacpProtocol.CONTROL_SINGLE_EAR_ANC,
+            AacpProtocol.CONTROL_AUTO_ANSWER,
+            AacpProtocol.CONTROL_TONE_VOLUME,
+            AacpProtocol.CONTROL_AUTOMATIC_CONNECTION,
+            AacpProtocol.CONTROL_VOLUME_SWIPE_DURATION,
+            AacpProtocol.CONTROL_CALL_MANAGEMENT,
+            AacpProtocol.CONTROL_VOLUME_SWIPE,
+            AacpProtocol.CONTROL_ADAPTIVE_VOLUME,
+            AacpProtocol.CONTROL_CONVERSATION,
+            AacpProtocol.CONTROL_HEARING_AID,
+            AacpProtocol.CONTROL_ADAPTIVE_STRENGTH,
+            AacpProtocol.CONTROL_HPS_GAIN_SWIPE,
+            AacpProtocol.CONTROL_HEARING_ASSIST,
+            AacpProtocol.CONTROL_ALLOW_OFF,
+            AacpProtocol.CONTROL_SLEEP_DETECTION,
+            AacpProtocol.CONTROL_ALLOW_AUTO_CONNECT,
+            AacpProtocol.CONTROL_PPE_TOGGLE,
+            AacpProtocol.CONTROL_PPE_CAP_LEVEL,
+            AacpProtocol.CONTROL_OPTIMIZED_CHARGING
+    };
 
     private volatile String address = "";
     private volatile String modelName = "AirPods";
@@ -587,6 +614,7 @@ final class AirPodsController implements AacpSession.Listener {
         chargingMask = 0;
         wearPrimary = wearSecondary = -1;
         opened = false;
+        controls.clear();
         stopSession();
         OfficialBatteryBridge.schedule(this);
         notifyChanged();
@@ -844,6 +872,7 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     boolean sendControl(int id, int... values) {
+        if (!restoringControls && isRestorableControl(id)) persistControl(id, values);
         AacpSession current = session;
         if (current != null && current.sendControl(id, values)) {
             Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
@@ -877,6 +906,7 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     boolean sendEqualizer(int enabled, int low, int mid, int high) {
+        persistEqualizer(enabled, low, mid, high);
         AacpSession current = session;
         if (current != null && current.sendEqualizer(enabled, low, mid, high)) return true;
         ensureSession();
@@ -895,7 +925,85 @@ final class AirPodsController implements AacpSession.Listener {
         ensureAttSession();
         main.postDelayed(this::flushPending, 250L);
         main.postDelayed(this::applyStemConfig, 500L);
+        main.postDelayed(this::applySavedControls, 1200L);
         notifyChanged();
+    }
+
+    private static boolean isRestorableControl(int id) {
+        for (int candidate : RESTORABLE_CONTROLS) {
+            if (candidate == id) return true;
+        }
+        return false;
+    }
+
+    private void persistControl(int id, int[] values) {
+        if (values == null || values.length == 0) return;
+        StringBuilder value = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) value.append(',');
+            value.append(values[i]);
+        }
+        prefs.edit().putString(controlKey(id), value.toString()).apply();
+    }
+
+    private void persistEqualizer(int enabled, int low, int mid, int high) {
+        prefs.edit().putString("device_equalizer", enabled + "," + low + "," + mid + "," + high).apply();
+    }
+
+    private static String controlKey(int id) {
+        return "device_control_" + Integer.toHexString(id);
+    }
+
+    private int[] savedControl(int id) {
+        String value = prefs.getString(controlKey(id), null);
+        if (value == null || value.isEmpty()) return null;
+        String[] parts = value.split(",");
+        int[] result = new int[parts.length];
+        try {
+            for (int i = 0; i < parts.length; i++) result[i] = Integer.parseInt(parts[i]);
+            return result;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private int[] savedEqualizer() {
+        String value = prefs.getString("device_equalizer", null);
+        if (value == null || value.isEmpty()) return null;
+        String[] parts = value.split(",");
+        if (parts.length != 4) return null;
+        try {
+            return new int[]{Integer.parseInt(parts[0]), Integer.parseInt(parts[1]),
+                    Integer.parseInt(parts[2]), Integer.parseInt(parts[3])};
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private void applySavedControls() {
+        if (!opened || !aacpOwner) return;
+        AacpSession current = session;
+        if (current == null) return;
+        restoringControls = true;
+        try {
+            for (int id : RESTORABLE_CONTROLS) {
+                int[] desired = savedControl(id);
+                if (desired == null || Arrays.equals(controls.get(id), desired)) continue;
+                setControlState(id, desired);
+                current.sendControl(id, desired);
+                Logx.i("AACP restored user control id=0x" + Integer.toHexString(id)
+                        + " values=" + Arrays.toString(desired));
+            }
+            int[] equalizer = savedEqualizer();
+            int[] activeEqualizer = controls.get(AacpProtocol.OP_EQUALIZER);
+            if (equalizer != null && !Arrays.equals(activeEqualizer, equalizer)) {
+                current.sendEqualizer(equalizer[0], equalizer[1], equalizer[2], equalizer[3]);
+                setControlState(AacpProtocol.OP_EQUALIZER, equalizer);
+                Logx.i("AACP restored equalizer values=" + Arrays.toString(equalizer));
+            }
+        } finally {
+            restoringControls = false;
+        }
     }
 
     private void flushPending() {

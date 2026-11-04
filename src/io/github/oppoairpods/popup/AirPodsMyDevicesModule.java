@@ -661,12 +661,19 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 hook(setFeature).intercept(chain -> {
                     int type = (int) chain.getArg(0);
                     int value = (int) chain.getArg(1);
-                    if (type == 4) {
+                    int controlId = type == 4 ? AacpProtocol.CONTROL_LISTENING_MODE
+                            : type == 16 ? AacpProtocol.CONTROL_CONVERSATION
+                            : type == 32 ? AacpProtocol.CONTROL_EAR_DETECTION : -1;
+                    if (controlId >= 0) {
                         Context context = appContext != null ? appContext : currentApplication();
                         if (context != null) {
                             AirPodsController controller = AirPodsController.get(context);
-                            controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, value);
-                            controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, value);
+                            int controlValue = type == 4 ? value : (value == 1 ? 1 : 2);
+                            controller.setControlState(controlId, controlValue);
+                            controller.sendControl(controlId, controlValue);
+                            Logx.i("official feature -> AACP type=" + type
+                                    + " id=0x" + Integer.toHexString(controlId)
+                                    + " value=" + controlValue);
                         }
                         return true;
                     }

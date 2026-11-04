@@ -26,18 +26,18 @@ final class FeatureSupportEnabler {
         AirPodsController controller = AirPodsController.get((Context) activity);
         synchronized (OBSERVERS) {
             if (OBSERVERS.containsKey(activity)) {
-                syncNoiseMode(activity);
+                syncFromController(activity);
                 return;
             }
             WeakReference<Object> target = new WeakReference<>(activity);
             AirPodsController.Listener listener = () -> {
                 Object value = target.get();
-                if (value != null) syncNoiseMode(value);
+                if (value != null) syncFromController(value);
             };
             controller.addListener(listener);
             OBSERVERS.put(activity, listener);
         }
-        new Handler(Looper.getMainLooper()).postDelayed(() -> syncNoiseMode(activity), 180L);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> syncFromController(activity), 180L);
     }
 
     static void release(Object activity) {
@@ -69,6 +69,7 @@ final class FeatureSupportEnabler {
             }
             call(activity, "updateNoiseSelectorItems");
             attach(activity);
+            syncFromController(activity);
             Object viewModel = call(activity, "getViewModel");
             if (viewModel != null) {
                 viewModel.getClass().getMethod("setIsSupportWearCheck", boolean.class).invoke(viewModel, true);
@@ -85,10 +86,23 @@ final class FeatureSupportEnabler {
         }
     }
 
-    private static void syncNoiseMode(Object activity) {
+    private static void syncFromController(Object activity) {
         if (!(activity instanceof Context)) return;
         try {
             AirPodsController controller = AirPodsController.get((Context) activity);
+            Object fragment = call(activity, "preferencesFragment");
+            if (fragment != null) {
+                int[] wear = controller.control(AacpProtocol.CONTROL_EAR_DETECTION);
+                if (wear != null && wear.length > 0) {
+                    call(fragment, "syncWearSwitch", new Class<?>[]{boolean.class},
+                            new Object[]{wear[0] == 1});
+                }
+                int[] conversation = controller.control(AacpProtocol.CONTROL_CONVERSATION);
+                if (conversation != null && conversation.length > 0) {
+                    call(fragment, "syncConversationSwitch", new Class<?>[]{int.class},
+                            new Object[]{conversation[0] == 1 ? 1 : 0});
+                }
+            }
             int[] current = controller.control(AacpProtocol.CONTROL_LISTENING_MODE);
             if (current == null || current.length == 0 || current[0] < 1 || current[0] > 4) return;
             call(activity, "updateCurrentFeature", new Class<?>[]{int.class},
