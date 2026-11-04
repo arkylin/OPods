@@ -29,6 +29,10 @@ final class AacpSession {
     private static final UUID AACP_UUID = UUID.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a");
     private static final ParcelUuid AACP_PARCEL_UUID = new ParcelUuid(AACP_UUID);
     private static final AtomicInteger NEXT_SESSION = new AtomicInteger(1);
+    // Bounded warm-up retries to capture the first battery snapshot on a live ACL when the
+    // session was started in no-retry mode. Not a background watchdog (see loop()).
+    private static final int WARMUP_RETRY_LIMIT = 3;
+    private static final long WARMUP_RETRY_DELAY_MS = 1200L;
 
     private final Context context;
     private final String address;
@@ -125,8 +129,10 @@ final class AacpSession {
 
     private void loop() {
         int failures = 0;
+        int warmupRetries = 0;
         while (running.get()) {
             boolean linkDown = false;
+            boolean gotData = false;
             try {
                 openAndRead();
                 failures = 0;
@@ -136,12 +142,34 @@ final class AacpSession {
             } catch (Throwable error) {
                 if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
             } finally {
+                gotData = lastReceiveAt > 0L;
                 closeSocket();
-                boolean stopSession = linkDown || (!allowRetries && running.get());
+                // Warm-up retry: the very first connect often opens the socket but goes silent
+                // before the earbuds push the first battery/event packet, and the session was
+                // created in no-retry mode (popup/ACL, no page open). Retry a bounded number of
+                // times *while the ACL is still up and no data was ever received* so we at least
+                // capture the initial battery snapshot. This is not a background reconnect
+                // watchdog: it never runs after data arrives, after the ACL drops, or past the
+                // small budget, and only bridges the handshake gap on a live link.
+                boolean warmup = running.get() && !linkDown && !allowRetries && !gotData
+                        && warmupRetries < WARMUP_RETRY_LIMIT && aclUp();
+                boolean stopSession = !warmup && (linkDown || (!allowRetries && running.get()));
                 if (stopSession && !linkDown && running.get()) {
                     Logx.i("AACP channel #" + sessionId + " background retry disabled; stopping");
                 }
-                if (running.get()) listener.onClosed(stopSession);
+                if (running.get() && !warmup) listener.onClosed(stopSession);
+                if (warmup) {
+                    warmupRetries++;
+                    Logx.i("AACP channel #" + sessionId + " warm-up retry "
+                            + warmupRetries + "/" + WARMUP_RETRY_LIMIT + " (no battery yet, ACL up)");
+                    try {
+                        Thread.sleep(WARMUP_RETRY_DELAY_MS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                }
             }
             if (linkDown) break;
             if (!running.get()) break;
@@ -156,6 +184,18 @@ final class AacpSession {
             }
         }
     }
+
+    private boolean aclUp() {
+        try {
+            BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+            if (adapter == null) return false;
+            return isConnected(adapter.getRemoteDevice(address));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
 
     private void openAndRead() throws Exception {
         BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
