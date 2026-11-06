@@ -53,7 +53,7 @@ jobs:
           src=src/io/github/oppoairpods/popup
           mkdir -p "$out"
           javac -encoding UTF-8 -d "$out" \
-            "$src/AacpProtocol.java" "$src/AirPodsAttData.java" "$src/HeadGestureTracker.java"             "$src/AppleAdvertisement.java" "$src/ProximityCrypto.java" \
+            "$src/AacpProtocol.java" "$src/AirPodsAttData.java" "$src/HeadGestureTracker.java"             "$src/AppleAdvertisement.java" "$src/ProximityCrypto.java" "$src/ListeningModeTracker.java" \
             test/io/github/oppoairpods/popup/*.java
           for file in test/io/github/oppoairpods/popup/*Test.java; do
             java -cp "$out" "io.github.oppoairpods.popup.$(basename "$file" .java)"

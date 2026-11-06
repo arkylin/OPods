@@ -233,11 +233,11 @@ final class AirPodsDashboard implements AirPodsController.Listener {
                 Math.max(0, mode - 1), index -> setListeningMode(index + 1));
         ui.detail(hero, ProtocolInfo.aacp(AacpProtocol.CONTROL_LISTENING_MODE, "01|02|03|04"));
         if (mode == 4) {
-            int shown = 100 - controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50);
-            ui.slider(hero, "自适应降噪强度", "0 更安静 · 100 更通透", 0, 100, shown,
+            int shown = controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50);
+            ui.slider(hero, "自适应降噪强度", "0 更通透 · 100 更安静", 0, 100, shown,
                     value -> value + "%", value -> controller.sendControl(
-                            AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 100 - value));
-            ui.detail(hero, ProtocolInfo.aacp(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, "<00..64 取反>"));
+                            AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
+            ui.detail(hero, ProtocolInfo.aacp(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, "<00..64>"));
         }
         content.addView(hero);
 
@@ -295,11 +295,11 @@ final class AirPodsDashboard implements AirPodsController.Listener {
 
     private void buildAudio() {
         LinearLayout adaptive = ui.section(content, "自适应音频");
-        ui.cardTitle(adaptive, "自适应降噪强度", "0 更安静 · 100 更通透；与首屏滑杆同步");
-        int shown = 100 - controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50);
+        ui.cardTitle(adaptive, "自适应降噪强度", "0 更通透 · 100 更安静；与首屏滑杆同步");
+        int shown = controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50);
         ui.slider(adaptive, "强度", null, 0, 100, shown, value -> value + "%",
-                value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 100 - value));
-        ui.detail(adaptive, ProtocolInfo.aacp(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, "<00..64 取反>"));
+                value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
+        ui.detail(adaptive, ProtocolInfo.aacp(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, "<00..64>"));
 
         LinearLayout eq = ui.section(content, "均衡器");
         ui.cardTitle(eq, "音效", "预设与自定义三段 EQ");
@@ -1400,8 +1400,7 @@ final class AirPodsDashboard implements AirPodsController.Listener {
     }
 
     private void setListeningMode(int mode) {
-        controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
-        controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+        controller.selectListeningMode(mode);
         main.postDelayed(() -> {
             if (dialog.isShowing()) rebuild();
         }, 220);

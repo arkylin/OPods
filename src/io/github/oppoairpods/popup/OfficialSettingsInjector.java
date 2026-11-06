@@ -80,8 +80,8 @@ final class OfficialSettingsInjector {
 
             try {
                 addAdaptiveSlider(screen,
-                        () -> 100 - controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
-                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 100 - value));
+                        () -> controller.controlValue(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, 50),
+                        value -> controller.sendControl(AacpProtocol.CONTROL_ADAPTIVE_STRENGTH, value));
             } catch (Throwable error) {
                 Logx.w("adaptive slider unavailable", error);
             }

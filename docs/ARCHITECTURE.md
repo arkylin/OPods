@@ -134,6 +134,19 @@ ATT（PSM 31）只在官方页面打开期间运行。通透和助听参数必�
 状态只存在目标官方进程的内存、该包自己的 SharedPreferences，以及供 `:cards` 与主进程共享
 电量快照的私有文件 `oppo_airpods_state.properties` 中，不向外导出 Provider 或文件接口。
 
+## 噪声模式只认一个来源
+
+噪声模式可以从四处切换：官方降噪栏、详情页快捷栏、增强面板和耳机柄动作，全部走
+`AirPodsController.selectListeningMode()`：
+
+- 选中的模式立即显示并经 AACP `0x0D` 发送；`ListeningModeTracker` 在发出后 3 秒内忽略耳机
+  报回的其他模式（切换约有 1 秒延迟，期间的状态转储还带着旧模式），确认后放行；若耳机在收到命令后
+  明确报回别的模式（例如没戴上被拒绝），窗口结束后以耳机为准。
+- ROM 自己的蓝牙回调或恢复页面时会调用 `updateCurrentFeature`：模块换成 AACP 实时模式，并直接
+  移动 `IconTextSelectorSettings` 的选中项（`setSelectedPosition`），不走 ROM 的整条重建
+  （`d(items, index)` 会删掉并重新创建所有图标，表现为闪烁）。
+- 自适应降噪强度滑杆直接显示 AACP `0x2E` 的数值，越大降噪越强。
+
 ## 与 LibrePods 对齐的手机端行为
 
 这些行为都在官方 `:cards` 进程内、AACP 通道在线时运行，不新建进程、Service 或 Receiver：

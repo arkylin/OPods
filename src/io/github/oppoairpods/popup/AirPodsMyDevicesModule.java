@@ -811,12 +811,13 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         if (mode >= 1 && mode <= 4) {
                             Context context = appContext != null ? appContext : currentApplication();
                             if (context != null) {
-                                AirPodsController controller = AirPodsController.get(context);
-                                controller.setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
-                                controller.sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+                                AirPodsController.get(context).selectListeningMode(mode);
                             }
-                            call(chain.getThisObject(), "updateCurrentFeature",
-                                    new Class<?>[]{int.class}, new Object[]{mode});
+                            // The bar already shows the tapped item; only sync the ROM's state.
+                            if (!FeatureSupportEnabler.showMode(chain.getThisObject(), mode)) {
+                                call(chain.getThisObject(), "updateCurrentFeature",
+                                        new Class<?>[]{int.class}, new Object[]{mode});
+                            }
                             return null;
                         }
                     } catch (Throwable ignored) {
@@ -825,6 +826,33 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 });
             } catch (Throwable error) {
                 Logx.w("noise click hook failed", error);
+            }
+            try {
+                // The ROM refreshes the noise bar from its own Bluetooth callback and on resume;
+                // its value lags the AACP report and updateCurrentFeature rebuilds every item.
+                Method updateFeature = activity.getDeclaredMethod("updateCurrentFeature", int.class);
+                hook(updateFeature).intercept(chain -> {
+                    int requested = (int) chain.getArg(0);
+                    int target = requested;
+                    try {
+                        Context context = appContext != null ? appContext : currentApplication();
+                        if (context != null) {
+                            int ours = AirPodsController.get(context).displayedListeningMode();
+                            if (ours >= 1 && ours <= 4) target = ours;
+                        }
+                        if (FeatureSupportEnabler.showMode(chain.getThisObject(), target)) {
+                            if (target != requested) {
+                                Logx.i("official noise update " + requested + " -> AACP mode " + target);
+                            }
+                            return null;
+                        }
+                    } catch (Throwable error) {
+                        Logx.w("official noise update redirect failed", error);
+                    }
+                    return target == requested ? chain.proceed() : chain.proceed(new Object[]{target});
+                });
+            } catch (Throwable error) {
+                Logx.w("noise bar update hook failed", error);
             }
             try {
                 Class<?> viewModel = Class.forName(
@@ -842,8 +870,12 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                         if (context != null) {
                             AirPodsController controller = AirPodsController.get(context);
                             int controlValue = type == 4 ? value : (value == 1 ? 1 : 2);
-                            controller.setControlState(controlId, controlValue);
-                            controller.sendControl(controlId, controlValue);
+                            if (type == 4) {
+                                controller.selectListeningMode(controlValue);
+                            } else {
+                                controller.setControlState(controlId, controlValue);
+                                controller.sendControl(controlId, controlValue);
+                            }
                             Logx.i("official feature -> AACP type=" + type
                                     + " id=0x" + Integer.toHexString(controlId)
                                     + " value=" + controlValue);

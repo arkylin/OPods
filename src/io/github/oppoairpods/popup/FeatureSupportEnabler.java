@@ -87,6 +87,40 @@ final class FeatureSupportEnabler {
         }
     }
 
+    /**
+     * Moves the official noise bar to {@code mode} by changing its selected item only. The ROM's
+     * updateCurrentFeature rebuilds every item view, which is what made the icons flash.
+     */
+    static boolean showMode(Object activity, int mode) {
+        try {
+            Object selector = call(activity, "getNoiseSelector");
+            Object itemId = call(activity, "noiseModeToItemId", new Class<?>[]{int.class}, new Object[]{mode});
+            if (selector == null || !(itemId instanceof Integer)) return false;
+            Object items = selector.getClass().getField("b").get(selector);
+            if (!(items instanceof java.util.List)) return false;
+            java.util.List<?> list = (java.util.List<?>) items;
+            int index = -1;
+            for (int i = 0; i < list.size(); i++) {
+                Object id = list.get(i).getClass().getMethod("getId").invoke(list.get(i));
+                if (itemId.equals(id)) {
+                    index = i;
+                    break;
+                }
+            }
+            if (index < 0) return false;
+            setIntField(activity, "pendingNoiseMode", mode);
+            Object current = selector.getClass().getMethod("getSelectedPosition").invoke(selector);
+            if (!(current instanceof Integer) || (Integer) current != index) {
+                Method select = selector.getClass().getDeclaredMethod("setSelectedPosition", int.class);
+                select.setAccessible(true);
+                select.invoke(selector, index);
+            }
+            return true;
+        } catch (Throwable error) {
+            return false;
+        }
+    }
+
     private static void syncFromController(Object activity) {
         if (!(activity instanceof Context)) return;
         try {
@@ -104,13 +138,14 @@ final class FeatureSupportEnabler {
                             new Object[]{conversation[0] == 1 ? 1 : 0});
                 }
             }
-            int[] current = controller.control(AacpProtocol.CONTROL_LISTENING_MODE);
-            if (current == null || current.length == 0 || current[0] < 1 || current[0] > 4) return;
-            call(activity, "updateCurrentFeature", new Class<?>[]{int.class},
-                    new Object[]{current[0]});
-            if (current[0] != lastLoggedMode) {
-                lastLoggedMode = current[0];
-                Logx.i("official noise synced mode=" + current[0]);
+            int current = controller.displayedListeningMode();
+            if (current < 1 || current > 4) return;
+            if (!showMode(activity, current)) {
+                call(activity, "updateCurrentFeature", new Class<?>[]{int.class}, new Object[]{current});
+            }
+            if (current != lastLoggedMode) {
+                lastLoggedMode = current;
+                Logx.i("official noise synced mode=" + current);
             }
         } catch (Throwable error) {
             Logx.w("official noise sync failed", error);
@@ -123,6 +158,18 @@ final class FeatureSupportEnabler {
                 Field field = type.getDeclaredField(name);
                 field.setAccessible(true);
                 field.setBoolean(target, value);
+                return;
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+    }
+
+    private static void setIntField(Object target, String name, int value) throws Exception {
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                field.setInt(target, value);
                 return;
             } catch (NoSuchFieldException ignored) {
             }

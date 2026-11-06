@@ -97,6 +97,10 @@ final class AirPodsController implements AacpSession.Listener {
     private volatile int wearSecondary = -1;
     private volatile long lastPopupAt;
     private volatile long lastCaseAt;
+    // A listening mode the user just picked, kept on screen until the AirPods confirm it.
+    private static final long MODE_CONFIRM_MS = 3000L;
+    private static final long MODE_QUEUE_MS = 15000L;
+    private final ListeningModeTracker modeTracker = new ListeningModeTracker(MODE_CONFIRM_MS);
     private final CallGestureMonitor callGestures;
     private final ConversationVolume conversationVolume;
     private volatile boolean callGestureActive;
@@ -652,8 +656,57 @@ final class AirPodsController implements AacpSession.Listener {
             }
             break;
         }
-        setControlState(AacpProtocol.CONTROL_LISTENING_MODE, next);
-        sendControl(AacpProtocol.CONTROL_LISTENING_MODE, next);
+        selectListeningMode(next);
+    }
+
+    /**
+     * The user picked a listening mode in any UI. Show it at once and send it; reports of the
+     * previous mode that are still in flight (state dumps, the ~1 s switch latency) must not
+     * flip the UI back.
+     */
+    void selectListeningMode(int mode) {
+        if (mode < 1 || mode > 4) return;
+        modeTracker.select(mode);
+        setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+        sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+        // Never keep a choice that could not even be sent pinned on screen forever.
+        main.postDelayed(() -> modeTracker.dropIfUnsent(mode), MODE_QUEUE_MS);
+    }
+
+    /** Mode the official UI should show; 0 when nothing better than the ROM's value is known. */
+    int displayedListeningMode() {
+        int pending = modeTracker.pending();
+        if (pending != 0) return pending;
+        AacpSession current = session;
+        if (current == null || !current.ready()) return 0;
+        return controlValue(AacpProtocol.CONTROL_LISTENING_MODE, 0);
+    }
+
+    private void noteListeningModeSent(int id, int[] values) {
+        if (id != AacpProtocol.CONTROL_LISTENING_MODE || values == null || values.length == 0) return;
+        if (modeTracker.sent(values[0], System.currentTimeMillis())) {
+            main.postDelayed(this::expirePendingListeningMode, MODE_CONFIRM_MS + 50L);
+        }
+    }
+
+    /** True for a listening-mode report that predates the user's latest choice. */
+    private boolean ignoreStaleListeningMode(int[] values) {
+        return values != null && values.length > 0
+                && modeTracker.report(values[0], System.currentTimeMillis());
+    }
+
+    private void expirePendingListeningMode() {
+        int kept = modeTracker.expire(System.currentTimeMillis());
+        if (kept == 0) return;
+        // The AirPods answered with another mode (for example not worn): show what they use.
+        controls.put(AacpProtocol.CONTROL_LISTENING_MODE, new int[]{kept, 0, 0, 0});
+        controlsRevision++;
+        Logx.i("listening mode not confirmed; AirPods stay on " + kept);
+        notifyChanged();
+    }
+
+    private void resetListeningModeTracking() {
+        modeTracker.reset();
     }
 
     private void dispatchMediaKey(int code) {
@@ -800,6 +853,7 @@ final class AirPodsController implements AacpSession.Listener {
         transparencyData = new byte[0];
         hearingAidData = new byte[0];
         loudSoundReduction = false;
+        resetListeningModeTracking();
         pendingRename = null;
         pendingHeadTracking = null;
         pendingEqualizer = null;
@@ -909,6 +963,7 @@ final class AirPodsController implements AacpSession.Listener {
         audioDisconnectedForWear = false;
         cancelWearDisconnect();
         conversationVolume.stopSpeaking();
+        resetListeningModeTracking();
         controlsRevision++;
         OfficialBatteryBridge.clear();
         OfficialDeviceStateBridge.clear(this);
@@ -1260,16 +1315,16 @@ final class AirPodsController implements AacpSession.Listener {
     boolean sendControl(int id, int... values) {
         if (isRestorableControl(id)) persistControl(id, values);
         AacpSession current = session;
-        if (current != null && current.ready() && current.sendControl(id, values)) {
-            Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
-                    + Arrays.toString(values) + " via #" + current.sessionId());
-            return true;
+        boolean sent = current != null && current.ready() && current.sendControl(id, values);
+        if (!sent) {
+            ensureSession();
+            current = session;
+            sent = current != null && current.ready() && current.sendControl(id, values);
         }
-        ensureSession();
-        current = session;
-        if (current != null && current.ready() && current.sendControl(id, values)) {
+        if (sent) {
             Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
                     + Arrays.toString(values) + " via #" + current.sessionId());
+            noteListeningModeSent(id, values);
             return true;
         }
         if (!aacpOwner) {
@@ -1424,7 +1479,7 @@ final class AirPodsController implements AacpSession.Listener {
             int[] next;
             while ((next = pendingControls.pollFirst()) != null) {
                 int[] values = Arrays.copyOfRange(next, 1, next.length);
-                current.sendControl(next[0], values);
+                if (current.sendControl(next[0], values)) noteListeningModeSent(next[0], values);
             }
         }
         String rename = pendingRename;
@@ -1528,6 +1583,13 @@ final class AirPodsController implements AacpSession.Listener {
                 publishBatterySnapshot();
                 break;
             case AacpProtocol.Event.TYPE_CONTROL:
+                if (event.controlId == AacpProtocol.CONTROL_LISTENING_MODE
+                        && ignoreStaleListeningMode(event.values)) {
+                    Logx.i("AACP control <- id=0xd values=" + Arrays.toString(event.values)
+                            + " ignored while switching to " + modeTracker.pending());
+                    // No UI refresh: the chosen mode stays on screen until confirmed or expired.
+                    return;
+                }
                 int[] previousControl = controls.put(event.controlId, event.values);
                 Logx.i("AACP control <- id=0x" + Integer.toHexString(event.controlId)
                         + " values=" + Arrays.toString(event.values));

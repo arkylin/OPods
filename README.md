@@ -5,9 +5,9 @@
 
 ## 当前版本
 
-- 当前版本：`v3.4.48`（`versionCode 82`，**待真机验证**）
-- 当前 Release：[v3.4.48-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.48-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
-- APK：`OPods-v3.4.48-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.48-arm64-v8a.sha256`
+- 当前版本：`v3.4.49`（`versionCode 83`，**待真机验证**）
+- 当前 Release：[v3.4.49-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.49-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
+- APK：`OPods-v3.4.49-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.49-arm64-v8a.sha256`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 切换到 100 年正式 Release 证书；3.4.29–3.4.31 同步官方弹窗、耳机页与 DeviceInfo；3.4.45 通过官方 CoreService IPC 刷新控制中心磁贴电量；3.4.46 修复磁贴充电状态被空快照覆盖；3.4.47 首连有限热身重试以拿到第一包电量。
@@ -20,6 +20,10 @@
   - 多副 AirPods 时按官方页面给出的设备工作，设备设置按耳机分别保存；
   - AACP 重试统一由“官方 AirPods 页面是否可见”决定，写入改到独立线程；
   - LibrePods 中做不到的功能也保留入口，并在面板里写明原因（“关于 → LibrePods 功能对照”）。
+- 3.4.49 修噪声切换：
+  - 自适应降噪强度滑杆改为越大降噪越强（直接对应 AACP `0x2E` 数值），官方页和面板三处一致；
+  - 切换降噪不再闪：官方降噪栏只移动选中项，不再让 ROM 每次重建整条栏；
+  - 刚连上时切换不再被旧状态顶回去：选中的模式会保持显示，耳机 3 秒内报回的旧模式被忽略，确认或超时后再以耳机为准。
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE、心率和头部手势仍需对应真机验收。
 
@@ -45,7 +49,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 ## 功能覆盖
 
-- 噪声四模式、自适应降噪强度、自适应音量、对话感知、单耳降噪。
+- 噪声四模式、自适应降噪强度（越大降噪越强）、自适应音量、对话感知、单耳降噪。
 - 对话感知手机端：说话时调低媒体音量（按比例或上限）、可同时暂停，结束后恢复。
 - 入耳播放/暂停（只恢复由模块暂停的播放）、取下时断开音频、低电量提醒、自动人耳检测。
 - 开盖自动连接：开盖弹出 OPPO 官方弹窗，由官方流程连接；用 IRK 识别自己的耳机。
@@ -75,7 +79,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 `关于`页有完整图例和 LibrePods 功能对照，每个控件下方都有对应的协议/存储标注。
 
-## Hook 范围：三个进程，33 个 Hook 点
+## Hook 范围：三个进程，34 个 Hook 点
 
 `xposed/scope.list` 只声明三个包，所有增强逻辑都通过 LibXposed 的
 `module.hook(...).intercept(...)` 在官方进程内完成，不使用 `XposedBridge` 直接 Hook，
@@ -83,7 +87,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 | 进程 | Hook 点数 | 职责 |
 | --- | ---: | --- |
-| `com.heytap.mydevices` | 31 | 官方 AirPods 弹窗、开盖 PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
+| `com.heytap.mydevices` | 32 | 官方 AirPods 弹窗、开盖 PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
 | `com.heytap.accessory` | 1 | 官方持久扫描器交出 Apple 邻近结果时，让官方 FusionWakeup 唤醒 MyDevices |
 | `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
@@ -91,7 +95,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 > Hook 两个重载；`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，因此运行时实际 Hook 的
 > 方法数可能多于调用点数。
 
-### `com.heytap.mydevices`：31 个 Hook 点
+### `com.heytap.mydevices`：32 个 Hook 点
 
 | # | 目标类 / 方法 | 作用 |
 | ---: | --- | --- |
@@ -120,12 +124,13 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 23 | `AirpodsSettingActivity.onStop()` | 页面离开前台时标记关闭，停止 ATT，AACP 进入只保留电量同步、不重试的模式。 |
 | 24 | `AirpodsSettingActivity.onDestroy()` | 页面销毁时同样标记关闭，并释放官方噪声选择器的同步监听。 |
 | 25 | `AirpodsSettingActivity.onNoiseControlClick(int)` | 模式 1–4 直接写入 AACP 并更新官方 UI，不再依赖 AirPods 走不通的官方噪声下发路径。 |
-| 26 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 类型 `4`（噪声）、`16`（对话感知）、`32`（佩戴检测）改走 AACP；其他类型继续官方实现。 |
-| 27 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗；忽略模块自身触发的重绘。 |
-| 28 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
-| 29 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
-| 30 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
-| 31 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
+| 26 | `AirpodsSettingActivity.updateCurrentFeature(int)` | ROM 用自己蓝牙回调或恢复页面时刷新降噪栏：换成 AACP 实时模式，并只移动选中项（ROM 原实现会重建整条栏，导致图标闪烁）。 |
+| 27 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 类型 `4`（噪声）、`16`（对话感知）、`32`（佩戴检测）改走 AACP；其他类型继续官方实现。 |
+| 28 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗；忽略模块自身触发的重绘。 |
+| 29 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
+| 30 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
+| 31 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
+| 32 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
 
 ### `com.heytap.accessory`：1 个 Hook 点
 
@@ -201,8 +206,8 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器；日志分享
 
 ## 安装
 
-1. 从 Release 下载 `OPods-v3.4.48-arm64-v8a.apk` 后安装：`adb install -r OPods-v3.4.48-arm64-v8a.apk`。
-2. 3.4.48 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 之后的版本直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。
+1. 从 Release 下载 `OPods-v3.4.49-arm64-v8a.apk` 后安装：`adb install -r OPods-v3.4.49-arm64-v8a.apk`。
+2. 3.4.49 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 之后的版本直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。
 3. 在 LSPosed 中启用模块，勾选三个作用域：`com.heytap.mydevices`、`com.heytap.accessory`、`com.android.bluetooth`。
 4. 停止 `com.heytap.mydevices` 和 `com.heytap.accessory`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
 5. 打开 AirPods 的官方设置页，确认出现官方噪声横条和“AirPods 增强”入口；连接一次 AirPods 后，“设备 → 识别密钥”应显示已获取。
@@ -229,9 +234,10 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 ```bash
 S=src/io/github/oppoairpods/popup
 javac -encoding UTF-8 -d out $S/AacpProtocol.java $S/AirPodsAttData.java $S/HeadGestureTracker.java \
-    $S/AppleAdvertisement.java $S/ProximityCrypto.java test/io/github/oppoairpods/popup/*.java
+    $S/AppleAdvertisement.java $S/ProximityCrypto.java $S/ListeningModeTracker.java     test/io/github/oppoairpods/popup/*.java
 java -cp out io.github.oppoairpods.popup.AacpProtocolTest
 java -cp out io.github.oppoairpods.popup.ProximityTest
+java -cp out io.github.oppoairpods.popup.ListeningModeTrackerTest
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再读取 AndroidManifest.xml 的版本号并构建
@@ -265,6 +271,7 @@ GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再�
 - `official device battery hook installed` 和 `AACP battery -> official DeviceInfo [...]`
 - `AACP channel #n warm-up retry` / `background retry disabled; stopping`
 - `head gesture call monitor started`、`incoming call: listening for nod/shake`
+- `ignored while switching to ...`、`official noise update a -> AACP mode b`、`listening mode not confirmed`
 - `ATT channel closed` / `ATT write not acknowledged`
 - `control queued until AACP opens`
 
