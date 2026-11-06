@@ -30,6 +30,7 @@ final class DashboardUi {
     final int dividerColor;
     final int dangerColor = Color.rgb(220, 68, 68);
     final float density;
+    private boolean dragging;
 
     DashboardUi(Context context) {
         this.context = context;
@@ -42,6 +43,11 @@ final class DashboardUi {
         textColor = dark ? Color.rgb(245, 245, 247) : Color.rgb(20, 20, 24);
         subTextColor = dark ? Color.rgb(166, 168, 176) : Color.rgb(105, 108, 116);
         dividerColor = dark ? Color.rgb(58, 59, 64) : Color.rgb(226, 228, 232);
+    }
+
+    /** True while the user holds a slider; rebuilding the page then would cancel the drag. */
+    boolean isDragging() {
+        return dragging;
     }
 
     int dp(float value) {
@@ -237,6 +243,11 @@ final class DashboardUi {
 
     void slider(LinearLayout parent, String title, String summary, int min, int max, int value,
                 java.util.function.IntFunction<String> formatter, IntConsumer onDone) {
+        slider(parent, title, summary, min, max, value, formatter, true, onDone);
+    }
+
+    void slider(LinearLayout parent, String title, String summary, int min, int max, int value,
+                java.util.function.IntFunction<String> formatter, boolean enabled, IntConsumer onDone) {
         LinearLayout block = new LinearLayout(context);
         block.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams blockParams = new LinearLayout.LayoutParams(
@@ -271,6 +282,8 @@ final class DashboardUi {
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(34));
         barParams.topMargin = dp(2);
         block.addView(bar, barParams);
+        bar.setEnabled(enabled);
+        block.setAlpha(enabled ? 1f : 0.45f);
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -279,10 +292,12 @@ final class DashboardUi {
 
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
+                dragging = true;
             }
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
+                dragging = false;
                 onDone.accept(seekBar.getProgress() + min);
             }
         });
@@ -347,6 +362,64 @@ final class DashboardUi {
         TextView valueView = text(value, 13, textColor, false);
         valueView.setGravity(Gravity.END);
         row.addView(valueView);
+    }
+
+    /** Inline explanation of a limitation: a coloured status tag followed by the reason. */
+    void notice(LinearLayout parent, String status, String message) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.TOP);
+        row.setPadding(dp(10), dp(8), dp(10), dp(8));
+        row.setBackground(rounded(cardColor, 12));
+        TextView tag = text(status, 10, Color.WHITE, true);
+        tag.setPadding(dp(6), dp(2), dp(6), dp(2));
+        tag.setBackground(rounded(statusColor(status), 8));
+        row.addView(tag, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        TextView body = text(message, 11, subTextColor, false);
+        LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        bodyParams.leftMargin = dp(8);
+        row.addView(body, bodyParams);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(8);
+        parent.addView(row, params);
+    }
+
+    /** One line of a comparison list: name, status tag, and where it lives or why it cannot. */
+    void featureRow(LinearLayout parent, String feature, String status, String detail) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(6), 0, dp(6));
+        LinearLayout top = new LinearLayout(context);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.addView(text(feature, 13, textColor, true), new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView tag = text(status, 10, Color.WHITE, true);
+        tag.setPadding(dp(6), dp(2), dp(6), dp(2));
+        tag.setBackground(rounded(statusColor(status), 8));
+        top.addView(tag);
+        row.addView(top);
+        if (detail != null && !detail.isEmpty()) {
+            TextView body = text(detail, 11, subTextColor, false);
+            LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            bodyParams.topMargin = dp(2);
+            row.addView(body, bodyParams);
+        }
+        parent.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    int statusColor(String status) {
+        if (status == null) return subTextColor;
+        if (status.startsWith("不可用")) return dangerColor;
+        if (status.startsWith("受限")) return Color.rgb(224, 138, 0);
+        if (status.startsWith("实验")) return accent;
+        if (status.startsWith("已支持")) return Color.rgb(46, 160, 67);
+        return subTextColor;
     }
 
     void toast(String message) {

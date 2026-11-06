@@ -13,6 +13,10 @@ import java.io.OutputStream;
 import java.lang.reflect.Constructor;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -29,21 +33,31 @@ final class AacpSession {
     private static final UUID AACP_UUID = UUID.fromString("74ec2172-0bad-4d01-8f77-997b2be0722a");
     private static final ParcelUuid AACP_PARCEL_UUID = new ParcelUuid(AACP_UUID);
     private static final AtomicInteger NEXT_SESSION = new AtomicInteger(1);
-    // Bounded warm-up retries to capture the first battery snapshot on a live ACL when the
-    // session was started in no-retry mode. Not a background watchdog (see loop()).
+    // Bounded warm-up retries to capture the first battery snapshot on a live ACL. Not a
+    // background watchdog (see loop()).
     private static final int WARMUP_RETRY_LIMIT = 3;
     private static final long WARMUP_RETRY_DELAY_MS = 1200L;
+    private static final long INIT_RETRY_1_MS = 1080L;
+    private static final long INIT_RETRY_2_MS = 5960L;
+    private static final long SILENCE_TIMEOUT_MS = 7000L;
 
     private final Context context;
     private final String address;
     private final Listener listener;
     private final int sessionId = NEXT_SESSION.getAndIncrement();
     private final AtomicBoolean running = new AtomicBoolean(false);
-    private final Object writeLock = new Object();
+    // The only thread that writes to the socket, so callers (often the main thread) never block
+    // on Bluetooth I/O or on the pauses between initialization packets.
+    private final ScheduledExecutorService writer = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread worker = new Thread(task, "OPPO-AirPods-AACP-tx");
+        worker.setDaemon(true);
+        return worker;
+    });
     private volatile BluetoothSocket socket;
     private volatile Thread thread;
     private volatile long lastReceiveAt;
-    private volatile boolean allowRetries = true;
+    private volatile boolean allowRetries;
+    private volatile boolean requestProximityKeys;
 
     AacpSession(Context context, String address, Listener listener) {
         this.context = context.getApplicationContext() == null ? context : context.getApplicationContext();
@@ -62,6 +76,7 @@ final class AacpSession {
     void stop() {
         running.set(false);
         closeSocket();
+        writer.shutdownNow();
         Thread worker = thread;
         if (worker != null) worker.interrupt();
     }
@@ -72,6 +87,11 @@ final class AacpSession {
 
     void setAllowRetries(boolean value) {
         allowRetries = value;
+    }
+
+    /** Ask for the IRK/ENC keys during initialization until they are stored for this pair. */
+    void setRequestProximityKeys(boolean value) {
+        requestProximityKeys = value;
     }
 
     boolean ready() {
@@ -102,86 +122,87 @@ final class AacpSession {
         return write(AacpProtocol.headTracking(start, alternate));
     }
 
-    boolean sendPacket(byte[] packet) {
-        return write(packet);
-    }
-
+    /** Queues the packet for the writer thread; false means the channel cannot take it right now. */
     boolean write(byte[] packet) {
         BluetoothSocket channel = socket;
-        if (channel == null) {
+        if (channel == null || !channel.isConnected()) {
             Logx.i("AACP tx #" + sessionId + " skipped: channel not open " + hex(packet));
             return false;
         }
         try {
-            synchronized (writeLock) {
-                OutputStream output = channel.getOutputStream();
-                output.write(packet);
-                output.flush();
-            }
-            Logx.i("AACP tx #" + sessionId + " " + hex(packet));
+            writer.execute(() -> writeNow(channel, packet));
             return true;
+        } catch (RejectedExecutionException stopped) {
+            return false;
+        }
+    }
+
+    private void writeNow(BluetoothSocket channel, byte[] packet) {
+        if (socket != channel) return;
+        try {
+            OutputStream output = channel.getOutputStream();
+            output.write(packet);
+            output.flush();
+            Logx.i("AACP tx #" + sessionId + " " + hex(packet));
         } catch (Throwable error) {
             Logx.w("AACP tx #" + sessionId + " failed " + hex(packet), error);
-            closeSocket();
-            return false;
+            if (socket == channel) closeSocket();
         }
     }
 
     private void loop() {
         int failures = 0;
         int warmupRetries = 0;
-        while (running.get()) {
-            boolean linkDown = false;
-            boolean gotData = false;
-            try {
-                openAndRead();
-                failures = 0;
-            } catch (LinkLostException lost) {
-                linkDown = true;
-                if (running.get()) Logx.i("AACP channel #" + sessionId + " ACL lost");
-            } catch (Throwable error) {
-                if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
-            } finally {
-                gotData = lastReceiveAt > 0L;
-                closeSocket();
-                // Warm-up retry: the very first connect often opens the socket but goes silent
-                // before the earbuds push the first battery/event packet, and the session was
-                // created in no-retry mode (popup/ACL, no page open). Retry a bounded number of
-                // times *while the ACL is still up and no data was ever received* so we at least
-                // capture the initial battery snapshot. This is not a background reconnect
-                // watchdog: it never runs after data arrives, after the ACL drops, or past the
-                // small budget, and only bridges the handshake gap on a live link.
-                boolean warmup = running.get() && !linkDown && !allowRetries && !gotData
-                        && warmupRetries < WARMUP_RETRY_LIMIT && aclUp();
-                boolean stopSession = !warmup && (linkDown || (!allowRetries && running.get()));
-                if (stopSession && !linkDown && running.get()) {
-                    Logx.i("AACP channel #" + sessionId + " background retry disabled; stopping");
+        try {
+            while (running.get()) {
+                boolean linkDown = false;
+                try {
+                    openAndRead();
+                } catch (LinkLostException lost) {
+                    linkDown = true;
+                    if (running.get()) Logx.i("AACP channel #" + sessionId + " ACL lost");
+                } catch (Throwable error) {
+                    if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
                 }
-                if (running.get() && !warmup) listener.onClosed(stopSession);
-                if (warmup) {
+                boolean gotData = lastReceiveAt > 0L;
+                closeSocket();
+                if (!running.get()) break;
+                // Warm-up retry: the very first connect often opens the socket but goes silent
+                // before the earbuds push the first battery/event packet. Retry a bounded number
+                // of times *while the ACL is still up and this attempt got no data* so we at
+                // least capture the initial battery snapshot. This is not a background reconnect
+                // watchdog: without an official page open it never runs after data arrived, after
+                // the ACL drops, or past the small budget; it only bridges the handshake gap.
+                if (!linkDown && !gotData && warmupRetries < WARMUP_RETRY_LIMIT && aclUp()) {
                     warmupRetries++;
                     Logx.i("AACP channel #" + sessionId + " warm-up retry "
                             + warmupRetries + "/" + WARMUP_RETRY_LIMIT + " (no battery yet, ACL up)");
-                    try {
-                        Thread.sleep(WARMUP_RETRY_DELAY_MS);
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
+                    if (!pause(WARMUP_RETRY_DELAY_MS)) break;
                     continue;
                 }
+                boolean stopping = linkDown || !allowRetries;
+                if (stopping && !linkDown) {
+                    Logx.i("AACP channel #" + sessionId + " background retry disabled; stopping");
+                }
+                listener.onClosed(stopping);
+                if (stopping) break;
+                failures = gotData ? 1 : failures + 1;
+                if (!pause(Math.min(60000L, 2000L << Math.min(5, failures - 1)))) break;
             }
-            if (linkDown) break;
-            if (!running.get()) break;
-            if (!allowRetries) break;
-            failures++;
-            long wait = Math.min(60000L, 2000L << Math.min(5, failures - 1));
-            try {
-                Thread.sleep(wait);
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                break;
-            }
+        } finally {
+            // A finished loop must never look alive, or ensureSession() would not replace it.
+            running.set(false);
+            writer.shutdownNow();
+        }
+    }
+
+    private static boolean pause(long millis) {
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -196,8 +217,8 @@ final class AacpSession {
         }
     }
 
-
     private void openAndRead() throws Exception {
+        lastReceiveAt = 0L;
         BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
         if (adapter == null || !adapter.isEnabled()) throw new IOException("Bluetooth unavailable");
@@ -206,7 +227,6 @@ final class AacpSession {
             throw new LinkLostException("ACL disconnected");
         }
         BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
-        lastReceiveAt = 0L;
         socket = channel;
         Thread watchdog = new Thread(() -> {
             try {
@@ -223,10 +243,9 @@ final class AacpSession {
             watchdog.interrupt();
         }
         if (!running.get()) return;
-        sendInitialization(channel, "initial");
+        scheduleInitialization(channel);
         listener.onOpened();
         Logx.i("AACP channel #" + sessionId + " opened");
-        scheduleInitializationRetry(channel);
         startSilenceWatchdog(channel);
         AacpProtocol.Framer framer = new AacpProtocol.Framer();
         InputStream input = channel.getInputStream();
@@ -238,7 +257,7 @@ final class AacpSession {
             logIncoming(raw);
             if (AacpProtocol.isHeadTracking(raw)) {
                 AacpProtocol.Event head = AacpProtocol.parse(raw);
-                if (head != null) {
+                if (head != null && running.get()) {
                     lastReceiveAt = System.currentTimeMillis();
                     listener.onEvent(head);
                 }
@@ -247,7 +266,7 @@ final class AacpSession {
             List<byte[]> packets = framer.feed(raw);
             for (byte[] packet : packets) {
                 AacpProtocol.Event event = AacpProtocol.parse(packet);
-                if (event != null) {
+                if (event != null && running.get()) {
                     lastReceiveAt = System.currentTimeMillis();
                     listener.onEvent(event);
                 }
@@ -255,9 +274,23 @@ final class AacpSession {
         }
     }
 
-    private void sendInitialization(BluetoothSocket channel, String phase) throws Exception {
-        synchronized (writeLock) {
-            if (!running.get() || socket != channel) return;
+    private void scheduleInitialization(BluetoothSocket channel) {
+        writer.execute(() -> sendInitialization(channel, "initial"));
+        writer.schedule(() -> retryInitialization(channel, "retry-1"),
+                INIT_RETRY_1_MS, TimeUnit.MILLISECONDS);
+        writer.schedule(() -> retryInitialization(channel, "retry-2"),
+                INIT_RETRY_2_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private void retryInitialization(BluetoothSocket channel, String phase) {
+        if (lastReceiveAt > 0L) return;
+        sendInitialization(channel, phase);
+    }
+
+    /** Runs on the writer thread; packets queued meanwhile simply wait behind it. */
+    private void sendInitialization(BluetoothSocket channel, String phase) {
+        if (!running.get() || socket != channel) return;
+        try {
             OutputStream output = channel.getOutputStream();
             output.write(AacpProtocol.HANDSHAKE);
             output.flush();
@@ -267,34 +300,25 @@ final class AacpSession {
             Thread.sleep(180L);
             output.write(AacpProtocol.notifications());
             output.flush();
-            Thread.sleep(120L);
-            output.write(AacpProtocol.keyRequest(1));
-            output.write(AacpProtocol.keyRequest(4));
-            output.flush();
-        }
-        Logx.i("AACP init #" + sessionId + " " + phase);
-    }
-
-    private void scheduleInitializationRetry(BluetoothSocket channel) {
-        Thread retry = new Thread(() -> {
-            try {
-                Thread.sleep(600L);
-                sendInitialization(channel, "retry-1");
-                Thread.sleep(4400L);
-                sendInitialization(channel, "retry-2");
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-            } catch (Throwable ignored) {
+            if (requestProximityKeys) {
+                // Lid-open identity check needs the IRK; the ENC key decrypts advert battery.
+                Thread.sleep(120L);
+                output.write(AacpProtocol.keyRequest(AacpProtocol.KEY_IRK | AacpProtocol.KEY_ENC));
+                output.flush();
             }
-        }, "OPPO-AirPods-AACP-init");
-        retry.setDaemon(true);
-        retry.start();
+            Logx.i("AACP init #" + sessionId + " " + phase);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        } catch (Throwable error) {
+            if (running.get()) Logx.w("AACP init #" + sessionId + " " + phase + " failed", error);
+            if (socket == channel) closeSocket();
+        }
     }
 
     private void startSilenceWatchdog(BluetoothSocket channel) {
         Thread watchdog = new Thread(() -> {
             try {
-                Thread.sleep(6500L);
+                Thread.sleep(SILENCE_TIMEOUT_MS);
                 if (running.get() && socket == channel && lastReceiveAt == 0L) {
                     Logx.w("AACP channel #" + sessionId + " silent; recycling", null);
                     closeSocket();
@@ -383,4 +407,3 @@ final class AacpSession {
         }
     }
 }
-

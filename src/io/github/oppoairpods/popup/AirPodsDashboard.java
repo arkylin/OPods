@@ -1,12 +1,11 @@
 package io.github.oppoairpods.popup;
 
 import android.app.Dialog;
+import android.bluetooth.BluetoothDevice;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.content.pm.PackageInfo;
 import android.os.Handler;
@@ -19,17 +18,16 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.IntConsumer;
+import java.util.Map;
 
 /** Card dashboard shown from the official MyDevices AirPods settings page. */
-final class AirPodsDashboard {
+final class AirPodsDashboard implements AirPodsController.Listener {
     private static final String[] TAB_NAMES = {"常用", "音频", "操控", "连接", "健康", "设备", "关于"};
     private static final String[] ACTION_NAMES = {"播放/暂停", "下一首", "上一首", "语音助手", "噪声模式"};
     private static final int[] PRESS_TYPES = {5, 6, 7, 8};
@@ -45,6 +43,9 @@ final class AirPodsDashboard {
     private final LinearLayout tabBar;
     private final Dialog dialog;
     private int page;
+    private int builtRevision;
+    private boolean builtOpened;
+    private boolean builtAttConnected;
 
     static void show(Context context, AirPodsController controller) {
         new AirPodsDashboard(context, controller).open();
@@ -94,6 +95,14 @@ final class AirPodsDashboard {
         }
         selectPage(0);
         refreshHeader();
+        controller.addListener(this);
+        dialog.setOnDismissListener(d -> {
+            controller.removeListener(this);
+            main.removeCallbacksAndMessages(null);
+            // The pose test is stopped by a delayed callback that was just removed; without
+            // this the AirPods would keep streaming head-tracking packets.
+            if (controller.headTrackingActive()) controller.setHeadTracking(false);
+        });
         dialog.show();
         Window shownWindow = dialog.getWindow();
         if (shownWindow != null) {
@@ -158,7 +167,24 @@ final class AirPodsDashboard {
         }, 120);
     }
 
+    /** Keeps the header live and redraws the page once the device reports changed values. */
+    @Override
+    public void onAirPodsStateChanged() {
+        if (!dialog.isShowing()) return;
+        refreshHeader();
+        if (ui.isDragging()) return;
+        if (controller.controlsRevision() != builtRevision || controller.opened() != builtOpened
+                || controller.attConnected() != builtAttConnected) {
+            int scroll = scrollView.getScrollY();
+            rebuild();
+            scrollView.post(() -> scrollView.scrollTo(0, scroll));
+        }
+    }
+
     private void rebuild() {
+        builtRevision = controller.controlsRevision();
+        builtOpened = controller.opened();
+        builtAttConnected = controller.attConnected();
         content.removeAllViews();
         if (page == 0) buildCommon();
         else if (page == 1) buildAudio();
@@ -233,8 +259,8 @@ final class AirPodsDashboard {
                 ProtocolInfo.localEvent("ear_playback", "AACP 06 佩戴事件 + 媒体键"),
                 controller.earPlayback(), true,
                 (button, checked) -> controller.setEarPlayback(checked)));
-        specs.add(new DashboardUi.ToggleSpec("开盖自动连接", "开盖后连接并显示官方弹窗",
-                ProtocolInfo.localEvent("auto_connect", "PTC 开盖广播 + Bluetooth"),
+        specs.add(new DashboardUi.ToggleSpec("开盖自动连接", "开盖时弹出官方弹窗，由官方流程连接",
+                ProtocolInfo.localEvent("auto_connect", "官方 PTC 开盖广播 + 官方弹窗"),
                 controller.autoConnect(), true,
                 (button, checked) -> controller.setAutoConnect(checked)));
         specs.add(new DashboardUi.ToggleSpec("低电量提醒", "电量低于 20% 时通知",
@@ -277,15 +303,15 @@ final class AirPodsDashboard {
 
         LinearLayout eq = ui.section(content, "均衡器");
         ui.cardTitle(eq, "音效", "预设与自定义三段 EQ");
-        String saved = controller.prefs().getString("equalizer_preset", "off");
+        String saved = controller.equalizerPreset();
         boolean custom = "custom".equals(saved);
         ui.detail(eq, ProtocolInfo.eq(2, "<low> <mid> <high>") + "；" + ProtocolInfo.local("equalizer_preset"));
         ui.segment(eq, new String[]{"预设", "自定义"}, custom ? 1 : 0, index -> {
             if (index == 0) {
-                controller.prefs().edit().putString("equalizer_preset", "off").apply();
+                controller.setEqualizerPreset("off");
                 controller.sendEqualizer(1, 50, 50, 50);
             } else {
-                controller.prefs().edit().putString("equalizer_preset", "custom").apply();
+                controller.setEqualizerPreset("custom");
                 int[] current = controller.control(AacpProtocol.OP_EQUALIZER);
                 controller.sendEqualizer(2, current != null && current.length > 3 ? current[1] : 50,
                         current != null && current.length > 3 ? current[2] : 50,
@@ -342,7 +368,7 @@ final class AirPodsDashboard {
                     if (col > 0) params.leftMargin = ui.dp(8);
                     row.addView(chip, params);
                     chip.setOnClickListener(v -> {
-                        controller.prefs().edit().putString("equalizer_preset", keys[index]).apply();
+                        controller.setEqualizerPreset(keys[index]);
                         int[] eqValues = eqFor(keys[index]);
                         controller.sendEqualizer(eqValues[0], eqValues[1], eqValues[2], eqValues[3]);
                         rebuild();
@@ -358,10 +384,66 @@ final class AirPodsDashboard {
                 value -> value + "%", value -> controller.sendControl(
                         AacpProtocol.CONTROL_TONE_VOLUME, value, 0x50));
         ui.detail(tone, ProtocolInfo.aacp(AacpProtocol.CONTROL_TONE_VOLUME, "<00..64> 50"));
+        buildConversationSection();
+        buildAccommodationSection();
+    }
+
+    private void buildConversationSection() {
+        LinearLayout ca = ui.section(content, "对话感知（手机端）");
+        ui.cardTitle(ca, "说话时调低媒体", "AirPods 检测到你开口说话时由手机调低音量，停下后恢复；需要打开“对话感知”");
+        List<DashboardUi.ToggleSpec> specs = new ArrayList<>();
+        specs.add(new DashboardUi.ToggleSpec("调低媒体音量", "说话时降到下面设置的音量",
+                ProtocolInfo.local("ca_lower_volume"), controller.conversationLowerVolume(), true,
+                (button, checked) -> controller.setConversationLowerVolume(checked)));
+        specs.add(new DashboardUi.ToggleSpec("同时暂停播放", "说话时暂停，结束后继续",
+                ProtocolInfo.local("ca_pause_music"), controller.conversationPauseMusic(), true,
+                (button, checked) -> controller.setConversationPauseMusic(checked)));
+        specs.add(new DashboardUi.ToggleSpec("按当前音量比例", "关闭后改为不超过最大音量的百分比",
+                ProtocolInfo.local("ca_relative_volume"), controller.conversationRelativeVolume(), true,
+                (button, checked) -> controller.setConversationRelativeVolume(checked)));
+        ui.toggleGrid(ca, specs);
+        ui.slider(ca, "降低到", "相对当前音量或最大音量的百分比", 0, 100,
+                controller.conversationVolumePercent(), v -> v + "%",
+                controller::setConversationVolumePercent);
+        ui.detail(ca, "AACP 4B 对话事件：01/02 开始说话，06/08/09 结束 · SP ca_* · 手机本地");
+    }
+
+    private void buildAccommodationSection() {
+        LinearLayout acc = ui.section(content, "耳机调节 EQ（实验）");
+        ui.cardTitle(acc, "Headphone Accommodation", "对应 LibrePods 的“Apply EQ to”：8 段增益写入耳机，作用于通话和/或媒体");
+        ui.notice(acc, "实验", "耳机不会回报当前值，这里显示的是本机上次写入的值；是否生效取决于机型和固件。");
+        float[] eq = controller.accommodationEq();
+        boolean[] targets = {controller.accommodationPhone(), controller.accommodationMedia()};
+        Runnable send = () -> {
+            if (!controller.sendHeadphoneAccommodation(eq, targets[0], targets[1])) {
+                ui.toast("控制通道未连接，已保存但未写入");
+            }
+        };
+        List<DashboardUi.ToggleSpec> specs = new ArrayList<>();
+        specs.add(new DashboardUi.ToggleSpec("应用到通话", null,
+                ProtocolInfo.local("accommodation_phone"), targets[0], true, (button, checked) -> {
+                    targets[0] = checked;
+                    send.run();
+                }));
+        specs.add(new DashboardUi.ToggleSpec("应用到媒体", null,
+                ProtocolInfo.local("accommodation_media"), targets[1], true, (button, checked) -> {
+                    targets[1] = checked;
+                    send.run();
+                }));
+        ui.toggleGrid(acc, specs);
+        String[] bands = {"250", "500", "1k", "2k", "3k", "4k", "6k", "8k"};
+        for (int i = 0; i < 8; i++) {
+            final int band = i;
+            ui.slider(acc, bands[i] + "Hz", null, 0, 100, Math.round(eq[i] * 100f), v -> v + "%", v -> {
+                eq[band] = v / 100f;
+                send.run();
+            });
+        }
+        ui.detail(acc, "AACP 53 00 84 00 02 02 <通话 01|02> <媒体 01|02> + 4×8 float · 设备（只写）");
     }
 
     private void sendCustomEq(int[] values) {
-        controller.prefs().edit().putString("equalizer_preset", "custom").apply();
+        controller.setEqualizerPreset("custom");
         controller.sendEqualizer(2, values[0], values[1], values[2]);
     }
 
@@ -437,26 +519,28 @@ final class AirPodsDashboard {
         ui.toggleGrid(call, callSpecs);
 
         LinearLayout head = ui.section(content, "头部手势");
-        ui.cardTitle(head, "点头 / 摇头", "点头接听、摇头拒接需要系统通话状态；当前先提供姿态接收测试");
+        ui.cardTitle(head, "点头 / 摇头", "来电响铃时点头接听、摇头拒接；可以先用下面的测试确认识别效果");
+        boolean headCapable = hasCapability(AirPodsModels.CAP_HEAD_GESTURES);
+        boolean headSupported = headCapable && controller.headGesturesEnabled();
         List<DashboardUi.ToggleSpec> headSpecs = new ArrayList<>();
-        boolean gestures = controller.prefs().getBoolean("head_gestures", true);
         headSpecs.add(new DashboardUi.ToggleSpec("启用头部手势", "允许 AirPods 上报头部姿态",
                 ProtocolInfo.localEvent("head_gestures", "AACP 17 姿态包"),
-                gestures, hasCapability(AirPodsModels.CAP_HEAD_GESTURES),
+                controller.headGesturesEnabled(), headCapable,
                 (button, checked) -> {
-                    controller.prefs().edit().putBoolean("head_gestures", checked).apply();
-                    controller.setHeadTracking(checked);
+                    controller.setHeadGesturesEnabled(checked);
+                    main.post(this::rebuild);
                 }));
-        headSpecs.add(new DashboardUi.ToggleSpec("头部控制通话", "识别到点头/摇头时发送接听键",
-                ProtocolInfo.localEvent("head_gesture_calls", "KEYCODE_HEADSETHOOK"),
-                controller.prefs().getBoolean("head_gesture_calls", false),
-                hasCapability(AirPodsModels.CAP_HEAD_GESTURES),
-                (button, checked) -> {
-                    controller.prefs().edit().putBoolean("head_gesture_calls", checked).apply();
-                    if (checked) controller.setHeadTracking(true);
-                }));
+        headSpecs.add(new DashboardUi.ToggleSpec("点头接听 / 摇头拒接", "响铃时识别；优先用系统接/挂电话接口，失败时改发耳机按键",
+                ProtocolInfo.localEvent("head_gesture_calls", "Telecom / KEYCODE_HEADSETHOOK"),
+                controller.headGestureCalls(), headSupported,
+                (button, checked) -> controller.setHeadGestureCalls(checked)));
+        headSpecs.add(new DashboardUi.ToggleSpec("使用备用头部追踪包", "收不到姿态包时再试（LibrePods 同名选项）",
+                ProtocolInfo.local("alternate_head_tracking"),
+                controller.alternateHeadTracking(), headSupported,
+                (button, checked) -> controller.setAlternateHeadTracking(checked)));
         ui.toggleGrid(head, headSpecs);
-        TextView headTest = ui.actionButton(controller.headTrackingActive() ? "停止姿态接收" : "测试姿态接收", false, v -> {
+        TextView headTest = ui.actionButton(controller.headTrackingActive() ? "停止姿态接收" : "测试姿态接收（10 秒）", false, v -> {
+            if (!headSupported) return;
             if (controller.headTrackingActive()) {
                 controller.setHeadTracking(false);
                 ui.toast("已停止头部姿态接收");
@@ -468,19 +552,25 @@ final class AirPodsDashboard {
                 main.postDelayed(() -> {
                     controller.setHeadTracking(false);
                     int received = controller.headTrackingPackets() - before;
-                    ui.toast("收到 " + received + " 个姿态包");
+                    ui.toast("收到 " + received + " 个姿态包，最近识别：" + lastGestureLabel());
                     if (dialog.isShowing()) rebuild();
                 }, 10000);
                 rebuild();
             }
         });
+        headTest.setAlpha(headSupported ? 1f : 0.45f);
         LinearLayout.LayoutParams testParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         testParams.topMargin = ui.dp(10);
         head.addView(headTest, testParams);
-        ui.detail(head, "AACP 17 00 ... · 设备姿态包；手机做阈值识别；SP head_gestures · 手机本地");
+        ui.detail(head, "AACP 17 00 ... · 设备姿态包；手机做阈值识别，只在测试或来电响铃期间接收");
         ui.infoRow(head, "已接收姿态包", controller.headTrackingPackets() + " 个");
         ui.infoRow(head, "最近识别", lastGestureLabel());
+
+        LinearLayout camera = ui.section(content, "相机遥控");
+        ui.cardTitle(camera, "按耳机柄拍照", "LibrePods：相机在前台时按一下耳机柄即按快门");
+        ui.notice(camera, "不可用", "LibrePods 用无障碍服务判断相机在前台，再用 root 执行 input keyevent 27 按快门。"
+                + "本模块不运行 root 命令、不新增服务，系统也不允许官方进程向相机发送按键，所以做不到。");
     }
 
     private DashboardUi.ToggleSpec modeToggle(String label, int bit, int current) {
@@ -554,19 +644,39 @@ final class AirPodsDashboard {
                 ProtocolInfo.localEvent("ear_playback", "AACP 06 佩戴事件 + 媒体键"),
                 controller.earPlayback(), true,
                 (button, checked) -> controller.setEarPlayback(checked)));
+        wearSpecs.add(new DashboardUi.ToggleSpec("取下时断开音频", "双耳取下 3 秒后断开媒体/通话音频，戴回时弹出官方弹窗恢复",
+                ProtocolInfo.localEvent("disconnect_when_not_wearing", "A2DP/HFP 断开 + 官方弹窗"),
+                controller.disconnectWhenNotWearing(), true,
+                (button, checked) -> controller.setDisconnectWhenNotWearing(checked)));
         ui.toggleGrid(wear, wearSpecs);
 
+        LinearLayout lid = ui.section(content, "开盖弹窗");
+        ui.cardTitle(lid, "开盖自动连接", "打开充电盒时弹出 OPPO 官方连接弹窗，由官方流程完成连接");
+        List<DashboardUi.ToggleSpec> lidSpecs = new ArrayList<>();
+        lidSpecs.add(new DashboardUi.ToggleSpec("开盖自动连接", "收到自己 AirPods 的开盖广播时弹窗",
+                ProtocolInfo.localEvent("auto_connect", "官方 PTC 开盖广播 + 官方弹窗"),
+                controller.autoConnect(), true,
+                (button, checked) -> controller.setAutoConnect(checked)));
+        lidSpecs.add(new DashboardUi.ToggleSpec("未拿到密钥时也响应", "还没拿到识别密钥的耳机按未验证方式弹窗",
+                ProtocolInfo.localEvent("lid_open_unverified_fallback", "未验证开盖"),
+                controller.lidOpenFallback(), controller.autoConnect(),
+                (button, checked) -> controller.setLidOpenFallback(checked)));
+        ui.toggleGrid(lid, lidSpecs);
+        ui.infoRow(lid, "识别密钥", controller.proximityKeyStatus());
+        ui.featureRow(lid, "最近开盖广播", "记录", controller.lastAdvertSummary());
+        ui.notice(lid, "受限", "ColorOS 官方扫描器只在亮屏时匹配 AirPods 开盖广播，息屏开盖不会弹窗；"
+                + "官方主进程没被 LSPosed 注入时，开盖唤醒依赖 :cards 进程还在运行。");
+        ui.notice(lid, "说明", "识别密钥（IRK）在 AACP 连接后自动向耳机请求。拿到之前无法区分附近别人的同型号 AirPods，"
+                + "可能被别人开盖触发弹窗；不想这样可以关闭“未拿到密钥时也响应”。");
+        ui.detail(lid, "Apple 0x4C 07 19 开盖广播（官方 PTC）· RPA 用 IRK 校验 · 电量用 ENC 解密");
+
         LinearLayout conn = ui.section(content, "自动连接");
-        ui.cardTitle(conn, "设备侧与本地策略", "设备侧 0x20 与开盖连接策略分开控制");
+        ui.cardTitle(conn, "设备侧配置", "连接与弹窗由 OPPO 官方流程负责；这里只写 AirPods 自己的 0x20 配置");
         List<DashboardUi.ToggleSpec> connSpecs = new ArrayList<>();
         connSpecs.add(new DashboardUi.ToggleSpec("AirPods 自动连接", "AACP 0x20 设备侧配置",
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_AUTOMATIC_CONNECTION),
                 controller.controlOn(AacpProtocol.CONTROL_AUTOMATIC_CONNECTION), true,
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_AUTOMATIC_CONNECTION, checked)));
-        connSpecs.add(new DashboardUi.ToggleSpec("开盖自动连接", "本机开盖后主动请求 A2DP/HFP",
-                ProtocolInfo.localEvent("auto_connect", "PTC 开盖广播 + Bluetooth"),
-                controller.autoConnect(), true,
-                (button, checked) -> controller.setAutoConnect(checked)));
         ui.toggleGrid(conn, connSpecs);
 
         LinearLayout mic = ui.section(content, "麦克风");
@@ -615,6 +725,28 @@ final class AirPodsDashboard {
         params.topMargin = ui.dp(10);
         info.addView(reconnect, params);
         ui.detail(info, ProtocolInfo.attRead(0x18) + "；" + ProtocolInfo.attRead(0x1B) + "；" + ProtocolInfo.attRead(0x2A));
+        TextView popup = ui.actionButton("通过官方弹窗连接", false, v -> {
+            BluetoothDevice device = controller.currentDevice();
+            if (device == null) device = controller.findActiveAirPods();
+            if (device == null) {
+                ui.toast("没有已配对的 AirPods");
+                return;
+            }
+            controller.launchOfficialPopupNow(device);
+        });
+        LinearLayout.LayoutParams popupParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        popupParams.topMargin = ui.dp(9);
+        info.addView(popup, popupParams);
+        ui.detail(info, "替代 LibrePods 的“重新连接上一台设备”：只打开官方弹窗，由官方流程连接");
+
+        LinearLayout policy = ui.section(content, "LibrePods 连接策略");
+        ui.cardTitle(policy, "自动接管与多设备", "LibrePods 的这些选项依赖它自己的后台扫描或改动蓝牙栈");
+        ui.notice(policy, "不可用", "按耳机状态（未连接/空闲/播放/通话）或手机事件（来电/开始播放）自动连接："
+                + "需要后台 BLE 扫描判断耳机状态并主动发起连接，违反“只走官方连接/弹窗流程、禁止自建扫描”的规则。"
+                + "可用替代：开盖弹窗、通过官方弹窗连接。");
+        ui.notice(policy, "不可用", "多设备连接（Multipoint）和“伪装为苹果设备”：需要修改蓝牙栈上报的 VendorID，"
+                + "本模块不修改蓝牙栈；依赖它的功能（大声降低、助听、通透自定义）可能被耳机忽略。");
     }
 
     private void buildHealth() {
@@ -623,6 +755,8 @@ final class AirPodsDashboard {
         if (!hearingAidSupported && !loudSupported) {
             LinearLayout note = ui.section(content, "听力健康");
             ui.cardTitle(note, "当前机型未声明听力能力", "AirPods 5 不支持助听/大声降低；Pro 3 才开放完整选项。");
+            ui.notice(note, "不可用", "需要 AirPods Pro 系列：助听器、听力测试结果、通透模式自定义、大声降低、EN 352 工作保护；"
+                    + "心率监测只有 AirPods Pro 3。");
             return;
         }
 
@@ -630,11 +764,12 @@ final class AirPodsDashboard {
         ui.cardTitle(protection, "环境噪声", "ATT 0x1B / PPE 0x37");
         List<DashboardUi.ToggleSpec> protectionSpecs = new ArrayList<>();
         protectionSpecs.add(new DashboardUi.ToggleSpec("大声降低", "透明与自适应模式下降低突发大声",
-                ProtocolInfo.attWrite(0x1B, "<100B>"),
+                ProtocolInfo.attWrite(0x1B, "01|00"),
                 controller.loudSoundReduction(), loudSupported && controller.attConnected(),
                 (button, checked) -> {
-                    controller.writeLoudSoundReduction(checked);
-                    ui.toast(checked ? "已开启大声降低" : "已关闭大声降低");
+                    boolean sent = controller.writeLoudSoundReduction(checked);
+                    ui.toast(!sent ? "ATT 未连接，未写入" : checked ? "已开启大声降低" : "已关闭大声降低");
+                    if (!sent) main.post(this::rebuild);
                 }));
         protectionSpecs.add(new DashboardUi.ToggleSpec("EN 352 工作保护", "限制最大媒体音量 82 dBA",
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_PPE_TOGGLE),
@@ -642,60 +777,64 @@ final class AirPodsDashboard {
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_PPE_TOGGLE, checked)));
         ui.toggleGrid(protection, protectionSpecs);
 
+        // ATT values are only editable once they were read from this connection: writing a
+        // made-up template could overwrite the transparency/hearing data stored on the AirPods.
         AirPodsAttData.Settings transparency = AirPodsAttData.parseTransparency(controller.transparencyData());
+        boolean trWritable = controller.transparencyWritable() && transparency != null;
         if (transparency == null) transparency = AirPodsAttData.Settings.defaults();
         LinearLayout tr = ui.section(content, "通透模式自定义");
-        ui.cardTitle(tr, "通透模式", controller.attConnected() ? "ATT 已连接" : "ATT 未连接，修改会在通道建立后写入");
+        ui.cardTitle(tr, "通透模式", trWritable ? "已读取通透参数，修改即写入 AirPods"
+                : controller.attConnected() ? "正在读取通透参数，读取完成前不可修改"
+                : "ATT 未连接，读取到 AirPods 当前参数前不可修改");
         final AirPodsAttData.Settings trValue = transparency;
         List<DashboardUi.ToggleSpec> trSpecs = new ArrayList<>();
         trSpecs.add(new DashboardUi.ToggleSpec("启用自定义通透", "写入 AirPods 通透参数",
                 ProtocolInfo.attWrite(0x18, "<100B>"),
-                trValue.transparencyEnabled, controller.attConnected(), (button, checked) -> {
+                trValue.transparencyEnabled, trWritable, (button, checked) -> {
                     trValue.transparencyEnabled = checked;
-                    controller.writeTransparency(trValue);
+                    writeAtt(trValue, false);
                 }));
         trSpecs.add(new DashboardUi.ToggleSpec("对话增强", "通透模式下增强前方语音",
                 ProtocolInfo.attWrite(0x18, "<100B>"),
                 trValue.leftConversationBoost || trValue.rightConversationBoost,
-                controller.attConnected(), (button, checked) -> {
+                trWritable, (button, checked) -> {
                     trValue.leftConversationBoost = checked;
                     trValue.rightConversationBoost = checked;
-                    controller.writeTransparency(trValue);
+                    writeAtt(trValue, false);
                 }));
         ui.toggleGrid(tr, trSpecs);
-        addAttAdjustmentSliders(tr, trValue, false);
-        addEqSliders(tr, trValue, true, "双耳 EQ");
+        addAttAdjustmentSliders(tr, trValue, false, trWritable);
+        addEqSliders(tr, trValue, "双耳 EQ", false, true, true, trWritable);
         ui.detail(tr, ProtocolInfo.attWrite(0x18, "<100B> 双耳 8 段 EQ"));
 
         AirPodsAttData.Settings hearing = AirPodsAttData.parseHearingAid(controller.hearingAidData());
+        boolean aidWritable = controller.hearingAidWritable() && hearing != null;
         if (hearing == null) hearing = AirPodsAttData.Settings.defaults();
         LinearLayout aid = ui.section(content, "助听器");
-        ui.cardTitle(aid, "助听模式", controller.hearingAidData().length >= 104
-                ? "已读取助听参数" : "尚未读取到助听参数，修改时使用默认值");
+        ui.cardTitle(aid, "助听模式", aidWritable ? "已读取助听参数，修改即写入 AirPods"
+                : controller.attConnected() ? "正在读取助听参数，读取完成前不可修改"
+                : "ATT 未连接，读取到 AirPods 当前参数前不可修改");
         final AirPodsAttData.Settings hearingValue = hearing;
         boolean aidEnabled = hearingAidEnabled();
         List<DashboardUi.ToggleSpec> aidSpecs = new ArrayList<>();
         aidSpecs.add(new DashboardUi.ToggleSpec("启用助听", "0x2C + 0x33",
-                "AACP 09 00 2C 01 01|02 + 09 00 33 01|02 · 设备；ATT 12 2A 00 <104B> · 设备",
+                "AACP 09 00 2C 01 01|02 + 09 00 33 01|02 · 设备",
                 aidEnabled, hearingAidSupported, (button, checked) -> setHearingAidEnabled(checked)));
         aidSpecs.add(new DashboardUi.ToggleSpec("滑动调节增益", "透明模式无媒体时滑动调节放大",
                 ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_HPS_GAIN_SWIPE),
                 controller.controlOn(AacpProtocol.CONTROL_HPS_GAIN_SWIPE), hearingAidSupported,
                 (button, checked) -> setOnOff(AacpProtocol.CONTROL_HPS_GAIN_SWIPE, checked)));
         ui.toggleGrid(aid, aidSpecs);
-        addAttAdjustmentSliders(aid, hearingValue, true);
+        addAttAdjustmentSliders(aid, hearingValue, true, aidWritable);
         ui.divider(aid);
-        TextView leftTitle = ui.text("左耳 8 段 EQ", 13, ui.textColor, true);
-        aid.addView(leftTitle);
-        addEqSliders(aid, hearingValue, false, null, true, true);
+        addEqSliders(aid, hearingValue, "左耳 8 段 EQ", true, true, false, aidWritable);
         ui.divider(aid);
-        TextView rightTitle = ui.text("右耳 8 段 EQ", 13, ui.textColor, true);
-        aid.addView(rightTitle);
-        addEqSliders(aid, hearingValue, false, null, true, false);
+        addEqSliders(aid, hearingValue, "右耳 8 段 EQ", true, false, true, aidWritable);
         ui.detail(aid, ProtocolInfo.attWrite(0x2A, "<104B> 左右耳 8 段 EQ"));
 
         LinearLayout test = ui.section(content, "听力测试");
-        ui.cardTitle(test, "更新听力图", "输入 dBHL 损失值；应用后会写回助听 EQ 数据");
+        ui.cardTitle(test, "更新听力图", "输入各频点听力损失（dB HL，"
+                + (int) AUDIOGRAM_MIN + "–" + (int) AUDIOGRAM_MAX + "）；应用后写回助听 EQ 数据");
         ui.detail(test, ProtocolInfo.attWrite(0x2A, "<104B> 双耳 EQ"));
         String[] frequencies = {"250Hz", "500Hz", "1kHz", "2kHz", "3kHz", "4kHz", "6kHz", "8kHz"};
         EditText[] leftFields = new EditText[8];
@@ -712,8 +851,10 @@ final class AirPodsDashboard {
             frequency.setGravity(Gravity.END);
             row.addView(frequency, new LinearLayout.LayoutParams(ui.dp(62),
                     ViewGroup.LayoutParams.WRAP_CONTENT));
-            leftFields[i] = hearingEdit(String.valueOf(hearing.leftEq[i]));
-            rightFields[i] = hearingEdit(String.valueOf(hearing.rightEq[i]));
+            leftFields[i] = hearingEdit(formatEq(hearing.leftEq[i]));
+            rightFields[i] = hearingEdit(formatEq(hearing.rightEq[i]));
+            leftFields[i].setEnabled(aidWritable);
+            rightFields[i].setEnabled(aidWritable);
             LinearLayout.LayoutParams fieldParams = new LinearLayout.LayoutParams(0,
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             fieldParams.leftMargin = ui.dp(8);
@@ -724,93 +865,143 @@ final class AirPodsDashboard {
             row.addView(rightFields[i], rightParams);
         }
         TextView apply = ui.actionButton("应用听力图并写回 AirPods", true, v -> {
-            for (int i = 0; i < 8; i++) {
-                hearingValue.leftEq[i] = parseFloat(leftFields[i].getText().toString(), hearingValue.leftEq[i]);
-                hearingValue.rightEq[i] = parseFloat(rightFields[i].getText().toString(), hearingValue.rightEq[i]);
+            if (!controller.hearingAidWritable()) {
+                ui.toast("尚未读取到助听参数，未写入");
+                return;
             }
-            setHearingAidEnabled(true);
-            controller.writeHearingAid(hearingValue);
-            ui.toast("已写入听力图");
+            for (int i = 0; i < 8; i++) {
+                Float left = parseEq(leftFields[i].getText().toString());
+                Float right = parseEq(rightFields[i].getText().toString());
+                if (left == null || right == null) {
+                    ui.toast(frequencies[i] + " 的数值需在 " + (int) AUDIOGRAM_MIN + "–"
+                            + (int) AUDIOGRAM_MAX + " dB HL 之间");
+                    return;
+                }
+                hearingValue.leftEq[i] = left;
+                hearingValue.rightEq[i] = right;
+            }
+            if (controller.writeHearingAid(hearingValue)) {
+                setHearingAidEnabled(true);
+                ui.toast("已写入听力图");
+            } else {
+                ui.toast("写入失败：ATT 未连接或参数未读取");
+            }
         });
+        apply.setAlpha(aidWritable ? 1f : 0.45f);
         LinearLayout.LayoutParams applyParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         applyParams.topMargin = ui.dp(12);
         test.addView(apply, applyParams);
         ui.detail(test, "AACP 2C 01 01 + 33 01 → 设备；ATT 12 2A 00 <104B>");
+
+        LinearLayout hrm = ui.section(content, "心率监测（实验）");
+        ui.cardTitle(hrm, "耳机心率传感器", "AACP 0x30，仅 AirPods Pro 3");
+        List<DashboardUi.ToggleSpec> hrmSpecs = new ArrayList<>();
+        hrmSpecs.add(new DashboardUi.ToggleSpec("开启心率传感器", null,
+                ProtocolInfo.aacpSwitch(AacpProtocol.CONTROL_HRM_STATE),
+                controller.controlOn(AacpProtocol.CONTROL_HRM_STATE), hasCapability(AirPodsModels.CAP_HRM),
+                (button, checked) -> setOnOff(AacpProtocol.CONTROL_HRM_STATE, checked)));
+        ui.toggleGrid(hrm, hrmSpecs);
+        ui.notice(hrm, "实验", "LibrePods 也只做到开关传感器；手机端暂时读不到心率数值。");
+
+        LinearLayout assist = ui.section(content, "媒体辅助");
+        ui.cardTitle(assist, "按听力图调整音乐和通话", "LibrePods 的 Media Assist");
+        ui.notice(assist, "不可用", "LibrePods 上游已把这部分界面注释掉，写入格式未确认，暂不提供写入。");
     }
 
-    private void addAttAdjustmentSliders(LinearLayout parent, AirPodsAttData.Settings value, boolean hearing) {
-        int amp = Math.round((value.netAmplification + 1f) * 50f);
-        int balance = Math.round((value.balance + 1f) * 50f);
-        int tone = Math.round((value.leftTone + 1f) * 50f);
-        int ambient = Math.round(value.leftAmbientNoiseReduction * 100f);
+    // AirPods report transparency EQ bands on a 0..100 scale (LibrePods uses the same range).
+    private static final float EQ_MAX = 100f;
+    // Audiogram entries are hearing levels in dB HL; audiometers cover roughly -10..120.
+    private static final float AUDIOGRAM_MIN = -20f;
+    private static final float AUDIOGRAM_MAX = 120f;
+
+    private void addAttAdjustmentSliders(LinearLayout parent, AirPodsAttData.Settings value,
+                                         boolean hearing, boolean enabled) {
+        int amp = toPercent(value.netAmplification);
+        int balance = toPercent(value.balance);
+        int tone = toPercent(value.leftTone);
+        int ambient = Math.round(clamp01(value.leftAmbientNoiseReduction) * 100f);
         ui.detail(parent, ProtocolInfo.attWrite(hearing ? 0x2A : 0x18, "<104B> 放大/平衡/音色/环境降噪"));
-        ui.slider(parent, "放大", "-100% 至 +100%", 0, 100, amp, v -> v + "%", v -> {
-            float next = v / 50f - 1f;
-            setAmpBalance(value, next, value.balance);
+        ui.slider(parent, "放大", "-100% 至 +100%", 0, 100, amp, v -> signedPercent(v), enabled, v -> {
+            value.setAmpBalance(fromPercent(v), value.balance);
             writeAtt(value, hearing);
         });
-        ui.slider(parent, "平衡", "左耳 ↔ 右耳", 0, 100, balance, v -> v + "%", v -> {
-            float next = v / 50f - 1f;
-            setAmpBalance(value, value.netAmplification, next);
+        ui.slider(parent, "平衡", "左耳 ↔ 右耳", 0, 100, balance, v -> balanceLabel(v), enabled, v -> {
+            value.setAmpBalance(value.netAmplification, fromPercent(v));
             writeAtt(value, hearing);
         });
-        ui.slider(parent, "音色", "更暗 ↔ 更亮", 0, 100, tone, v -> v + "%", v -> {
-            value.leftTone = v / 50f - 1f;
+        ui.slider(parent, "音色", "更暗 ↔ 更亮", 0, 100, tone, v -> signedPercent(v), enabled, v -> {
+            value.leftTone = fromPercent(v);
             value.rightTone = value.leftTone;
             writeAtt(value, hearing);
         });
-        ui.slider(parent, "环境噪声降低", "少 ↔ 多", 0, 100, ambient, v -> v + "%", v -> {
+        ui.slider(parent, "环境噪声降低", "少 ↔ 多", 0, 100, ambient, v -> v + "%", enabled, v -> {
             value.leftAmbientNoiseReduction = v / 100f;
             value.rightAmbientNoiseReduction = value.leftAmbientNoiseReduction;
             writeAtt(value, hearing);
         });
         if (hearing) {
-            int own = Math.round(value.ownVoiceAmplification * 100f);
-            ui.slider(parent, "自己的声音", "助听模式的自己声音放大", 0, 100, own, v -> v + "%", v -> {
+            int own = Math.round(clamp01(value.ownVoiceAmplification) * 100f);
+            ui.slider(parent, "自己的声音", "助听模式的自己声音放大", 0, 100, own, v -> v + "%", enabled, v -> {
                 value.ownVoiceAmplification = v / 100f;
                 writeAtt(value, true);
             });
         }
     }
 
-    private void addEqSliders(LinearLayout parent, AirPodsAttData.Settings value, boolean bothEars, String title) {
-        addEqSliders(parent, value, bothEars, title, false, true);
-    }
-
-    private void addEqSliders(LinearLayout parent, AirPodsAttData.Settings value, boolean bothEars,
-                              String title, boolean hearing, boolean leftEar) {
-        if (title != null) {
-            TextView label = ui.text(title, 13, ui.textColor, true);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            params.topMargin = ui.dp(10);
-            parent.addView(label, params);
-        }
+    private void addEqSliders(LinearLayout parent, AirPodsAttData.Settings value, String title,
+                              boolean hearing, boolean leftEar, boolean rightEar, boolean enabled) {
+        TextView label = ui.text(title, 13, ui.textColor, true);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = ui.dp(10);
+        parent.addView(label, params);
         String[] bands = {"250", "500", "1k", "2k", "3k", "4k", "6k", "8k"};
         for (int i = 0; i < 8; i++) {
             final int index = i;
-            float current = (leftEar ? value.leftEq[index] : value.rightEq[index]);
-            int shown = Math.round(Math.max(0f, Math.min(1f, current)) * 100f);
-            ui.slider(parent, bands[i] + "Hz", null, 0, 100, shown, v -> v + "%", v -> {
-                float next = v / 100f;
-                value.leftEq[index] = next;
-                if (bothEars || !leftEar) value.rightEq[index] = next;
+            float current = leftEar ? value.leftEq[index] : value.rightEq[index];
+            int shown = Math.round(Math.max(0f, Math.min(EQ_MAX, current)));
+            ui.slider(parent, bands[i] + "Hz", null, 0, (int) EQ_MAX, shown, v -> String.valueOf(v), enabled, v -> {
+                value.setEq(index, v, leftEar, rightEar);
                 writeAtt(value, hearing);
             });
         }
     }
 
-    private void setAmpBalance(AirPodsAttData.Settings value, float amp, float balance) {
-        value.netAmplification = Math.max(-1f, Math.min(1f, amp));
-        value.balance = Math.max(-1f, Math.min(1f, balance));
-        value.leftAmplification = value.netAmplification + Math.min(0f, value.balance);
-        value.rightAmplification = value.netAmplification + Math.max(0f, value.balance);
+    private void writeAtt(AirPodsAttData.Settings value, boolean hearing) {
+        boolean sent = hearing ? controller.writeHearingAid(value) : controller.writeTransparency(value);
+        if (!sent) {
+            ui.toast("写入失败：ATT 未连接或参数未读取");
+            main.post(this::rebuild);
+        }
     }
 
-    private void writeAtt(AirPodsAttData.Settings value, boolean hearing) {
-        if (hearing) controller.writeHearingAid(value);
-        else controller.writeTransparency(value);
+    private static int toPercent(float signed) {
+        return Math.round((Math.max(-1f, Math.min(1f, signed)) + 1f) * 50f);
+    }
+
+    private static float fromPercent(int value) {
+        return value / 50f - 1f;
+    }
+
+    private static String signedPercent(int value) {
+        int signed = value * 2 - 100;
+        return (signed > 0 ? "+" : "") + signed + "%";
+    }
+
+    private static String balanceLabel(int value) {
+        int signed = value * 2 - 100;
+        if (signed == 0) return "居中";
+        return signed < 0 ? "偏左 " + (-signed) + "%" : "偏右 " + signed + "%";
+    }
+
+    private static float clamp01(float value) {
+        return Math.max(0f, Math.min(1f, value));
+    }
+
+    private static String formatEq(float value) {
+        return Math.abs(value - Math.round(value)) < 0.005f
+                ? String.valueOf(Math.round(value)) : String.format(java.util.Locale.ROOT, "%.2f", value);
     }
 
     private EditText hearingEdit(String text) {
@@ -826,11 +1017,13 @@ final class AirPodsDashboard {
         return edit;
     }
 
-    private static float parseFloat(String text, float fallback) {
+    /** Parses one audiogram field; null unless it is a finite hearing level in range. */
+    private static Float parseEq(String text) {
         try {
-            return Float.parseFloat(text.trim());
+            float value = Float.parseFloat(text.trim());
+            return Float.isFinite(value) && value >= AUDIOGRAM_MIN && value <= AUDIOGRAM_MAX ? value : null;
         } catch (Throwable ignored) {
-            return fallback;
+            return null;
         }
     }
 
@@ -849,7 +1042,7 @@ final class AirPodsDashboard {
 
     private void buildDevice() {
         LinearLayout rename = ui.section(content, "设备名称");
-        ui.cardTitle(rename, "重命名", "通过 AACP 0x1A 写入，同时更新本机别名");
+        ui.cardTitle(rename, "重命名", "通过 AACP 0x1A 写入 AirPods");
         EditText name = new EditText(context);
         name.setText(controller.modelName());
         name.setTextSize(15);
@@ -860,8 +1053,13 @@ final class AirPodsDashboard {
         rename.addView(name, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         TextView apply = ui.actionButton("保存名称", true, v -> {
-            controller.sendRename(name.getText().toString());
-            ui.toast("已发送重命名");
+            String value = name.getText().toString().trim();
+            if (value.isEmpty()) {
+                ui.toast("名称不能为空");
+                return;
+            }
+            controller.sendRename(value);
+            ui.toast(controller.opened() ? "已发送重命名" : "控制通道连接后发送重命名");
         });
         LinearLayout.LayoutParams applyParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -900,6 +1098,155 @@ final class AirPodsDashboard {
         params.topMargin = ui.dp(9);
         actions.addView(disconnect, params);
         ui.detail(actions, ProtocolInfo.attRead(0x18) + "；" + ProtocolInfo.attRead(0x1B) + "；" + ProtocolInfo.attRead(0x2A) + "；BluetoothDevice.disconnect() · 手机系统");
+        buildKeysSection();
+        buildRawControlsSection();
+        buildAdvancedControlsSection();
+        buildTroubleshootingSection();
+        LinearLayout find = ui.section(content, "查找（Find My）");
+        ui.cardTitle(find, "加入查找网络 / 充电盒播放声音", null);
+        ui.notice(find, "不可用", "LibrePods 上游也还没有实现（需要进一步逆向，可能还要 root），这里先保留入口。");
+    }
+
+    private void buildKeysSection() {
+        LinearLayout keys = ui.section(content, "识别密钥");
+        ui.cardTitle(keys, "IRK / ENC", "AirPods 通过 AACP 0x31 下发；用于开盖时确认是自己的耳机、解密广播电量");
+        ui.infoRow(keys, "当前耳机", controller.proximityKeyStatus());
+        ui.featureRow(keys, "最近开盖广播", "记录", controller.lastAdvertSummary());
+        ui.detail(keys, "AACP 30 00 05 00 请求 · 31 回复 · 只保存在 MyDevices 私有目录，日志不记录密钥内容");
+    }
+
+    private void buildRawControlsSection() {
+        LinearLayout raw = ui.section(content, "全部控制项（原始值）");
+        ui.cardTitle(raw, "AirPods 回报的控制值", "连接时耳机会回报全部控制项，这里按原样列出");
+        Map<Integer, int[]> snapshot = controller.controlsSnapshot();
+        if (snapshot.isEmpty()) {
+            ui.infoRow(raw, "暂无", "控制通道连接后显示");
+            return;
+        }
+        for (Map.Entry<Integer, int[]> entry : snapshot.entrySet()) {
+            ui.infoRow(raw, controlName(entry.getKey()), hexValues(entry.getValue()));
+        }
+    }
+
+    private void buildAdvancedControlsSection() {
+        LinearLayout adv = ui.section(content, "高级控制（实验）");
+        ui.cardTitle(adv, "LibrePods 已定义、未在其界面开放的控制项", "含义未完全确认，修改前请确认你知道它的作用");
+        ui.notice(adv, "实验", "这些开关直接写 AACP 09 控制包，以耳机回报为准；“软件静音”可能让麦克风无声，"
+                + "“语音唤醒”只对支持的固件有效。");
+        int[] ids = {AacpProtocol.CONTROL_VOICE_TRIGGER, AacpProtocol.CONTROL_IN_CASE_TONE,
+                AacpProtocol.CONTROL_SIRI_MULTITONE, AacpProtocol.CONTROL_SOFTWARE_MUTE,
+                AacpProtocol.CONTROL_ALLOW_AUTO_CONNECT, AacpProtocol.CONTROL_SSL};
+        String[] names = {"语音唤醒", "盒内提示音", "Siri 多段提示音", "软件静音", "允许自动连接（0x36）", "SSL（0x29）"};
+        List<DashboardUi.ToggleSpec> specs = new ArrayList<>();
+        for (int i = 0; i < ids.length; i++) {
+            final int id = ids[i];
+            specs.add(new DashboardUi.ToggleSpec(names[i], null, ProtocolInfo.aacpSwitch(id),
+                    controller.controlOn(id), true, (button, checked) -> {
+                        if (!controller.sendRawControl(id, checked ? 1 : 2)) ui.toast("控制通道未连接");
+                    }));
+        }
+        ui.toggleGrid(adv, specs);
+        ui.detail(adv, "只读项（按键发送模式 0x05、连接归属 0x06、单击/双击/长按模式 0x14–0x16、"
+                + "表冠方向 0x1C、EN 352 上限 0x38）见上方原始值列表");
+    }
+
+    private void buildTroubleshootingSection() {
+        LinearLayout trouble = ui.section(content, "故障排查");
+        ui.cardTitle(trouble, "调试日志", "排查问题时可以把最近的日志分享出去");
+        ui.featureRow(trouble, "日志文件", "本机", Logx.logPath());
+        TextView share = ui.actionButton("分享最近日志", false, v -> shareLog());
+        LinearLayout.LayoutParams shareParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        shareParams.topMargin = ui.dp(10);
+        trouble.addView(share, shareParams);
+        TextView clear = ui.actionButton("清空日志", false, v -> {
+            Logx.clear();
+            ui.toast("已清空日志");
+        });
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clearParams.topMargin = ui.dp(9);
+        trouble.addView(clear, clearParams);
+        ui.detail(trouble, "日志只保存在本机；分享时由你选择目标应用，模块本身不联网");
+    }
+
+    private void shareLog() {
+        String log = Logx.tail(400);
+        if (log == null || log.isEmpty()) {
+            ui.toast("暂无日志");
+            return;
+        }
+        try {
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_SUBJECT, "OPods 日志");
+            send.putExtra(Intent.EXTRA_TEXT, log);
+            Intent chooser = Intent.createChooser(send, "分享 OPods 日志");
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(chooser);
+        } catch (Throwable error) {
+            ui.toast("无法分享日志");
+        }
+    }
+
+    private static String controlName(int id) {
+        String name;
+        switch (id) {
+            case 0x01: name = "麦克风"; break;
+            case 0x05: name = "按键发送模式"; break;
+            case 0x06: name = "连接归属"; break;
+            case 0x0A: name = "自动人耳检测"; break;
+            case 0x0D: name = "聆听模式"; break;
+            case 0x12: name = "语音唤醒"; break;
+            case 0x14: name = "单击模式"; break;
+            case 0x15: name = "双击模式"; break;
+            case 0x16: name = "长按模式"; break;
+            case 0x17: name = "按压速度"; break;
+            case 0x18: name = "长按时长"; break;
+            case 0x1A: name = "长按循环模式"; break;
+            case 0x1B: name = "单耳降噪"; break;
+            case 0x1C: name = "表冠方向"; break;
+            case 0x1E: name = "自动接听"; break;
+            case 0x1F: name = "提示音音量"; break;
+            case 0x20: name = "自动连接"; break;
+            case 0x23: name = "音量滑动速度"; break;
+            case 0x24: name = "通话控制"; break;
+            case 0x25: name = "音量滑动"; break;
+            case 0x26: name = "自适应音量"; break;
+            case 0x27: name = "软件静音"; break;
+            case 0x28: name = "对话感知"; break;
+            case 0x29: name = "SSL"; break;
+            case 0x2C: name = "助听器"; break;
+            case 0x2E: name = "自适应强度"; break;
+            case 0x2F: name = "滑动调节增益"; break;
+            case 0x30: name = "心率"; break;
+            case 0x31: name = "盒内提示音"; break;
+            case 0x32: name = "Siri 多段提示音"; break;
+            case 0x33: name = "助听辅助"; break;
+            case 0x34: name = "允许关闭"; break;
+            case 0x35: name = "睡眠检测"; break;
+            case 0x36: name = "允许自动连接"; break;
+            case 0x37: name = "EN 352"; break;
+            case 0x38: name = "EN 352 上限"; break;
+            case 0x39: name = "耳机柄配置"; break;
+            case 0x3B: name = "优化充电上限"; break;
+            case 0x4B: name = "对话事件（本地）"; break;
+            case 0x63: name = "均衡器（本地）"; break;
+            default: name = "未知"; break;
+        }
+        String hex = Integer.toHexString(id).toUpperCase(java.util.Locale.ROOT);
+        return "0x" + (hex.length() == 1 ? "0" + hex : hex) + " " + name;
+    }
+
+    private static String hexValues(int[] values) {
+        if (values == null || values.length == 0) return "-";
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < values.length; i++) {
+            if (i > 0) text.append(' ');
+            String part = Integer.toHexString(values[i] & 0xFF).toUpperCase(java.util.Locale.ROOT);
+            text.append(part.length() == 1 ? "0" + part : part);
+        }
+        return text.toString();
     }
 
     private void buildAbout() {
@@ -938,11 +1285,13 @@ final class AirPodsDashboard {
         github.addView(release, releaseParams);
         ui.detail(github, "https://github.com/arkylin/OPods/releases/latest");
 
+        buildParitySection();
+
         LinearLayout storage = ui.section(content, "数据位置说明");
         ui.cardTitle(storage, "设备 / 手机 / 协同", "每个控件下方都标注了协议和保存位置");
         ui.infoRow(storage, "设备", "AACP 或 ATT 写入 AirPods，设置保存在耳机");
-        ui.infoRow(storage, "手机", "SharedPreferences、媒体键、连接策略");
-        ui.infoRow(storage, "手机协同", "耳机事件 + 手机媒体键/蓝牙 Profile");
+        ui.infoRow(storage, "手机", "SharedPreferences（按耳机分别保存）、媒体键");
+        ui.infoRow(storage, "手机协同", "耳机事件 + 手机媒体键");
         ui.infoRow(storage, "官方页", "Intent 打开 OPPO 官方 Activity");
         ui.detail(storage, "AACP 公共头 04 00 04 00；控制 body 09 00 id v0 v1 v2 v3");
 
@@ -963,12 +1312,63 @@ final class AirPodsDashboard {
         paragraph(disclaimer, "AirPods、Apple 名称和商标归 Apple Inc.；OPPO、ColorOS 归 OPPO；本项目仅用于兼容性研究与个人使用。");
     }
 
+    private void buildParitySection() {
+        LinearLayout parity = ui.section(content, "LibrePods 功能对照");
+        ui.cardTitle(parity, "上游 LibrePods 的功能在这里的位置",
+                "已支持 / 受限 / 实验 / 不可用；受限和不可用的原因也写在对应页面");
+        String[][] rows = {
+                {"聆听模式切换", "已支持", "常用页噪声控制、官方首屏横条"},
+                {"入耳检测与自动播放/暂停", "已支持", "连接页“自动人耳检测”“入耳播放”"},
+                {"电量显示", "已支持", "官方弹窗、耳机页、控制中心磁贴和面板头部"},
+                {"重命名", "已支持", "设备页；ColorOS 可能仍显示旧名，需要重新配对"},
+                {"大声降低", "已支持", "健康页；需要 Pro 机型，可能还需要苹果 VendorID"},
+                {"头部手势（点头接听/摇头拒接）", "已支持", "操控页；包含姿态测试与备用追踪包"},
+                {"对话感知", "已支持", "常用页开关 + 音频页手机端降音量/暂停"},
+                {"自动连接到 AirPods", "已支持", "连接页 0x20 设备侧配置 + 开盖自动连接"},
+                {"开盖弹窗", "受限", "连接页；只在亮屏时官方扫描器能匹配，息屏开盖不弹"},
+                {"助听器 / 听力测试结果", "已支持", "健康页；需要 Pro 机型"},
+                {"通透模式自定义", "已支持", "健康页；需要 Pro 机型"},
+                {"多设备连接（Multipoint）", "不可用", "需要修改蓝牙栈 VendorID，本模块不改蓝牙栈"},
+                {"按压速度 / 长按时长 / 单耳降噪 / 音量滑动 / 滑动速度", "已支持", "操控页、常用页"},
+                {"长按循环模式 / 语音助手", "已支持", "操控页耳机柄动作"},
+                {"通话控制 / 自动接听", "已支持", "操控页"},
+                {"个性化音量", "已支持", "常用页“自适应音量”"},
+                {"麦克风", "已支持", "连接页"},
+                {"入睡时暂停", "已支持", "连接页“睡眠检测”"},
+                {"允许“关闭”聆听模式", "已支持", "连接页“允许关闭”"},
+                {"优化充电上限", "已支持", "连接页“优化充电”（0x3B）"},
+                {"提示音音量", "已支持", "音频页"},
+                {"自适应音频强度", "已支持", "常用页、音频页"},
+                {"均衡器", "已支持", "音频页预设与自定义"},
+                {"耳机调节 EQ（Apply EQ to）", "实验", "音频页；只写不读"},
+                {"EN 352 工作保护", "已支持", "健康页；需要 Pro 机型"},
+                {"心率监测", "实验", "健康页；需要 Pro 3，只能开关传感器"},
+                {"媒体辅助（Media Assist）", "不可用", "上游也已注释掉，写入格式未确认"},
+                {"相机遥控", "不可用", "上游依赖无障碍服务和 root 按键注入"},
+                {"按耳机状态/来电/播放自动接管", "不可用", "需要自建后台扫描和主动连接，违反只走官方流程的规则"},
+                {"取下时断开音频", "已支持", "连接页"},
+                {"重新连接上一台设备", "已支持", "连接页“通过官方弹窗连接”"},
+                {"伪装为苹果设备（VendorID）", "不可用", "需要修改蓝牙栈"},
+                {"备用头部追踪包", "已支持", "操控页"},
+                {"识别密钥（IRK/ENC）", "已支持", "设备页；用于开盖识别和广播电量"},
+                {"全部控制项 / 高级控制", "实验", "设备页"},
+                {"故障排查日志", "已支持", "设备页分享/清空日志"},
+                {"设备信息", "已支持", "设备页"},
+                {"小组件 / 弹窗动画 / 灵动岛 / 主题", "受限", "没有独立 App；由 ColorOS 官方弹窗和控制中心磁贴代替"},
+                {"低电量通知", "已支持", "常用页、连接页"},
+                {"查找（Find My）", "不可用", "上游也未实现"},
+                {"头部追踪空间音频", "受限", "只能打开 ColorOS 官方空间音频页；上游也未实现"},
+                {"高质量双向音频", "不可用", "上游实验项，需要系统层面的编码支持"},
+        };
+        for (String[] row : rows) ui.featureRow(parity, row[0], row[1], row[2]);
+    }
+
     private String versionName() {
         try {
             PackageInfo info = context.getPackageManager().getPackageInfo("io.github.oppoairpods.popup", 0);
             return info.versionName;
         } catch (Throwable ignored) {
-            return "3.4.31";
+            return "-";
         }
     }
 
@@ -977,7 +1377,7 @@ final class AirPodsDashboard {
             PackageInfo info = context.getPackageManager().getPackageInfo("io.github.oppoairpods.popup", 0);
             return String.valueOf(info.getLongVersionCode());
         } catch (Throwable ignored) {
-            return "65";
+            return "-";
         }
     }
 

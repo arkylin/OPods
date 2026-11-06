@@ -13,6 +13,7 @@ import java.util.WeakHashMap;
 /** Makes the ROM's existing noise selector and sections usable for AirPods 5 / Pro 3. */
 final class FeatureSupportEnabler {
     private static final Map<Object, AirPodsController.Listener> OBSERVERS = new WeakHashMap<>();
+    private static volatile int lastLoggedMode = -1;
 
     private FeatureSupportEnabler() {}
 
@@ -107,7 +108,10 @@ final class FeatureSupportEnabler {
             if (current == null || current.length == 0 || current[0] < 1 || current[0] > 4) return;
             call(activity, "updateCurrentFeature", new Class<?>[]{int.class},
                     new Object[]{current[0]});
-            Logx.i("official noise synced mode=" + current[0]);
+            if (current[0] != lastLoggedMode) {
+                lastLoggedMode = current[0];
+                Logx.i("official noise synced mode=" + current[0]);
+            }
         } catch (Throwable error) {
             Logx.w("official noise sync failed", error);
         }

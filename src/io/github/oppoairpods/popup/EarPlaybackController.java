@@ -10,10 +10,24 @@ final class EarPlaybackController {
 
     static void onWearChanged(AirPodsController controller, int previous, int current) {
         if (!controller.earPlayback() || previous == current) return;
+        Context context = controller.context();
         if (current == 0 && previous > 0) {
-            controller.setPausedByEar(dispatch(controller.context(), KeyEvent.KEYCODE_MEDIA_PAUSE));
+            // Only claim the pause when something is really playing; otherwise putting the buds
+            // back in would start playback the user never asked for.
+            controller.setPausedByEar(isMusicActive(context)
+                    && dispatch(context, KeyEvent.KEYCODE_MEDIA_PAUSE));
         } else if (current > 0 && previous == 0 && controller.ownsPause()) {
-            if (dispatch(controller.context(), KeyEvent.KEYCODE_MEDIA_PLAY)) controller.setPausedByEar(false);
+            if (dispatch(context, KeyEvent.KEYCODE_MEDIA_PLAY)) controller.setPausedByEar(false);
+        }
+    }
+
+    private static boolean isMusicActive(Context context) {
+        try {
+            AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            return audio != null && audio.isMusicActive();
+        } catch (Throwable error) {
+            Logx.w("music state unavailable", error);
+            return false;
         }
     }
 

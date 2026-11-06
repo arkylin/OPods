@@ -53,8 +53,7 @@ final class SliderTickDrawable extends Drawable {
         float backgroundLeft = bounds.left + capInset - backgroundHeight / 2.0f;
         float backgroundRight = bounds.right - capInset + backgroundHeight / 2.0f;
 
-        paint.setAlpha(alpha);
-        paint.setColor(TRACK_INACTIVE_COLOR);
+        setPaintColor(TRACK_INACTIVE_COLOR);
         canvas.drawRoundRect(new RectF(backgroundLeft, centerY - backgroundHeight / 2.0f,
                 backgroundRight, centerY + backgroundHeight / 2.0f),
                 backgroundHeight / 2.0f, backgroundHeight / 2.0f, paint);
@@ -62,15 +61,21 @@ final class SliderTickDrawable extends Drawable {
         float halfTrack = trackHeight / 2.0f;
         float activeLeft = bounds.left + capInset - halfTrack;
         float activeRight = Math.max(activeLeft, thumbCenterX + halfTrack);
-        paint.setColor(TRACK_ACTIVE_COLOR);
+        setPaintColor(TRACK_ACTIVE_COLOR);
         canvas.drawRoundRect(new RectF(activeLeft, centerY - halfTrack,
                 activeRight, centerY + halfTrack), halfTrack, halfTrack, paint);
 
         for (int i = 0; i <= 4; i++) {
             float x = bounds.left + capInset + availableWidth * (i / 4.0f);
-            paint.setColor(x <= thumbCenterX ? ACTIVE_COLOR : INACTIVE_COLOR);
+            setPaintColor(x <= thumbCenterX ? ACTIVE_COLOR : INACTIVE_COLOR);
             canvas.drawCircle(x, centerY, keyPointRadius, paint);
         }
+    }
+
+    /** setColor() also overwrites the alpha channel, so it has to be reapplied afterwards. */
+    private void setPaintColor(int color) {
+        paint.setColor(color);
+        paint.setAlpha(alpha);
     }
 
     @Override

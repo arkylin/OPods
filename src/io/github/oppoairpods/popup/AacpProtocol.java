@@ -19,6 +19,12 @@ final class AacpProtocol {
     static final int OP_INFORMATION = 0x1D;
     static final int OP_CONVERSATION = 0x4B;
     static final int OP_EQUALIZER = 0x63;
+    static final int OP_PROXIMITY_KEYS_REQUEST = 0x30;
+    static final int OP_PROXIMITY_KEYS_RESPONSE = 0x31;
+    static final int OP_HEADPHONE_ACCOMMODATION = 0x53;
+
+    static final int KEY_IRK = 0x01;
+    static final int KEY_ENC = 0x04;
 
     static final int CONTROL_LISTENING_MODE = 0x0D;
     static final int CONTROL_MICROPHONE = 0x01;
@@ -46,6 +52,19 @@ final class AacpProtocol {
     static final int CONTROL_PPE_CAP_LEVEL = 0x38;
     static final int CONTROL_STEM_CONFIG = 0x39;
     static final int CONTROL_ALLOW_AUTO_CONNECT = 0x36;
+    // Defined by LibrePods' ControlCommandIdentifiers; most are not exposed in its own UI.
+    static final int CONTROL_BUTTON_SEND_MODE = 0x05;
+    static final int CONTROL_OWNS_CONNECTION = 0x06;
+    static final int CONTROL_VOICE_TRIGGER = 0x12;
+    static final int CONTROL_SINGLE_CLICK_MODE = 0x14;
+    static final int CONTROL_DOUBLE_CLICK_MODE = 0x15;
+    static final int CONTROL_CLICK_HOLD_MODE = 0x16;
+    static final int CONTROL_CROWN_ROTATION = 0x1C;
+    static final int CONTROL_SOFTWARE_MUTE = 0x27;
+    static final int CONTROL_SSL = 0x29;
+    static final int CONTROL_HRM_STATE = 0x30;
+    static final int CONTROL_IN_CASE_TONE = 0x31;
+    static final int CONTROL_SIRI_MULTITONE = 0x32;
 
     private AacpProtocol() {}
 
@@ -57,9 +76,26 @@ final class AacpProtocol {
         return concat(HEADER, new byte[]{0x0F, 0, -1, -1, -1, -1});
     }
 
-    static byte[] keyRequest(int type) {
-        return concat(HEADER, new byte[]{0x30, 0, (byte) type, 0});
+    /** Proximity key request (LibrePods sends IRK | ENC = 0x05); the reply is opcode 0x31. */
+    static byte[] keyRequest(int types) {
+        return concat(HEADER, new byte[]{OP_PROXIMITY_KEYS_REQUEST, 0, (byte) types, 0});
     }
+
+    /**
+     * Headphone accommodation EQ (LibrePods sendPhoneMediaEQ): 8 bands of 0..1, repeated four
+     * times, applied to calls and/or media (01 = on, 02 = off).
+     */
+    static byte[] headphoneAccommodation(float[] eq, boolean phone, boolean media) {
+        if (eq == null || eq.length != 8) throw new IllegalArgumentException("EQ needs 8 bands");
+        byte[] head = {4, 0, 4, 0, OP_HEADPHONE_ACCOMMODATION, 0, (byte) 0x84, 0, 2, 2,
+                (byte) (phone ? 1 : 2), (byte) (media ? 1 : 2)};
+        java.nio.ByteBuffer body = java.nio.ByteBuffer.allocate(128).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        for (int block = 0; block < 4; block++) {
+            for (int band = 0; band < 8; band++) body.putFloat(Math.max(0f, Math.min(1f, eq[band])));
+        }
+        return concat(head, body.array());
+    }
+
     static byte[] control(int id, int... values) {
         byte[] packet = new byte[11];
         System.arraycopy(HEADER, 0, packet, 0, 4);
@@ -121,6 +157,18 @@ final class AacpProtocol {
         return result;
     }
 
+    /** Compares control payloads; the device always reports four values, callers often send one. */
+    static boolean sameControlValues(int[] first, int[] second) {
+        if (first == null || second == null) return first == second;
+        int size = Math.max(first.length, second.length);
+        for (int i = 0; i < size; i++) {
+            int a = i < first.length ? first[i] : 0;
+            int b = i < second.length ? second[i] : 0;
+            if (a != b) return false;
+        }
+        return true;
+    }
+
     static final class Event {
         static final int TYPE_BATTERY = 1;
         static final int TYPE_CONTROL = 2;
@@ -130,6 +178,7 @@ final class AacpProtocol {
         static final int TYPE_CONVERSATION = 6;
         static final int TYPE_HEAD_TRACKING = 7;
         static final int TYPE_STEM_PRESS = 8;
+        static final int TYPE_PROXIMITY_KEYS = 9;
 
         final int type;
         int left = -1;
@@ -164,6 +213,8 @@ final class AacpProtocol {
         int stemPressType = -1;
         int stemPressBud = -1;
         byte[] raw = new byte[0];
+        byte[] irk;
+        byte[] encKey;
 
         Event(int type) {
             this.type = type;
@@ -213,6 +264,8 @@ final class AacpProtocol {
                 eq.eqHigh = u(packet, 12);
                 if (eq.eqState < 1 || eq.eqState > 2 || eq.eqLow > 100 || eq.eqMid > 100 || eq.eqHigh > 100) return null;
                 return eq;
+            case OP_PROXIMITY_KEYS_RESPONSE:
+                return parseProximityKeys(packet);
             case 0x4B:
                 if (packet.length < 8) return null;
                 Event conversation = new Event(Event.TYPE_CONVERSATION);
@@ -222,6 +275,26 @@ final class AacpProtocol {
             default:
                 return null;
         }
+    }
+
+    /** 04 00 04 00 31 00 <count> then per key: <type> <?> <len> <?> <key bytes> (LibrePods). */
+    private static Event parseProximityKeys(byte[] packet) {
+        if (packet.length < 7) return null;
+        int count = u(packet, 6);
+        int offset = 7;
+        Event event = new Event(Event.TYPE_PROXIMITY_KEYS);
+        for (int i = 0; i < count; i++) {
+            if (offset + 4 > packet.length) break;
+            int type = u(packet, offset);
+            int length = u(packet, offset + 2);
+            offset += 4;
+            if (offset + length > packet.length) break;
+            byte[] key = Arrays.copyOfRange(packet, offset, offset + length);
+            if (type == KEY_IRK) event.irk = key;
+            else if (type == KEY_ENC) event.encKey = key;
+            offset += length;
+        }
+        return event.irk != null || event.encKey != null ? event : null;
     }
 
     private static Event parseBattery(byte[] packet) {
@@ -309,6 +382,9 @@ final class AacpProtocol {
 
     /** AACP may coalesce several packets in one L2CAP read; keep only complete frames. */
     static final class Framer {
+        private static final int INVALID_LENGTH = -1;
+        private static final int NEED_MORE_DATA = -2;
+
         private byte[] pending = new byte[0];
 
         List<byte[]> feed(byte[] data) {
@@ -319,22 +395,19 @@ final class AacpProtocol {
             System.arraycopy(pending, 0, combined, 0, pending.length);
             System.arraycopy(data, 0, combined, pending.length, data.length);
             pending = combined;
-            while (pending.length >= 4) {
-                if (pending[0] == 0 && pending[1] == 0 && pending[2] == 4 && pending[3] == 0) {
-                    if (pending.length < 16) break;
-                    pending = Arrays.copyOfRange(pending, 16, pending.length);
-                    continue;
-                }
-                if (pending[0] != 4 || pending[1] != 0 || pending[2] != 4 || pending[3] != 0) {
-                    pending = Arrays.copyOfRange(pending, 1, pending.length);
-                    continue;
-                }
-                if (pending.length < 7) break;
-                int size = frameLength(pending);
-                if (size < 0) {
+            while (pending.length > 0) {
+                // Each read is one L2CAP SDU, so non-AACP data such as the handshake ACK
+                // (01 00 04 00 ...) can be dropped whole. Keeping any tail would let its bytes
+                // merge with the next frame and swallow it.
+                int start = nextHeader(pending, 0);
+                if (start < 0) {
                     pending = new byte[0];
                     break;
                 }
+                if (start > 0) pending = Arrays.copyOfRange(pending, start, pending.length);
+                if (pending.length < 7) break;
+                int size = frameLength(pending);
+                if (size == NEED_MORE_DATA) break;
                 if (size < 6 || size > 4096) {
                     int next = nextHeader(pending, 4);
                     if (next < 0) {
@@ -365,9 +438,9 @@ final class AacpProtocol {
                 case OP_EQUALIZER:
                     return 13;
                 case 0x4B: {
-                    if (packet.length < 8) return -1;
+                    if (packet.length < 8) return NEED_MORE_DATA;
                     int payload = (packet[6] & 0xFF) | ((packet[7] & 0xFF) << 8);
-                    return payload >= 1 && payload <= 64 ? 8 + payload : -1;
+                    return payload >= 1 && payload <= 64 ? 8 + payload : INVALID_LENGTH;
                 }
                 case 0x0E:
                     return 13;

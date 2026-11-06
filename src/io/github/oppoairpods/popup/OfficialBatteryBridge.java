@@ -20,6 +20,7 @@ final class OfficialBatteryBridge {
     private static final Map<Class<?>, Method> DETAIL_METHODS = new ConcurrentHashMap<>();
     private static final AtomicBoolean APPLYING = new AtomicBoolean();
     private static final AtomicBoolean SCHEDULED = new AtomicBoolean();
+    private static final AtomicBoolean CLEAR_SCHEDULED = new AtomicBoolean();
     private static final AtomicBoolean POPUP_ERROR_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean DETAIL_ERROR_LOGGED = new AtomicBoolean();
     private static volatile WeakReference<Object> popup = new WeakReference<>(null);
@@ -29,6 +30,11 @@ final class OfficialBatteryBridge {
     private static volatile String lastApplied = "";
 
     private OfficialBatteryBridge() {
+    }
+
+    /** True while this bridge itself repaints an official surface. */
+    static boolean applying() {
+        return APPLYING.get();
     }
 
     static void registerPopup(Object value) {
@@ -65,9 +71,9 @@ final class OfficialBatteryBridge {
     }
 
     static void clear() {
-        if (!SCHEDULED.compareAndSet(false, true)) return;
+        if (!CLEAR_SCHEDULED.compareAndSet(false, true)) return;
         MAIN.post(() -> {
-            SCHEDULED.set(false);
+            CLEAR_SCHEDULED.set(false);
             applyBattery(new int[]{-1, -1, -1, 4, 4, 4});
         });
     }

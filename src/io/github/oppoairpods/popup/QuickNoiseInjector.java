@@ -42,9 +42,10 @@ final class QuickNoiseInjector {
         Context context = selector.getContext();
         OfficialCoreBridge.capture(fragment);
         AirPodsController controller = AirPodsController.get(context);
-        BluetoothDevice device = controller.findBondedAirPods();
+        BluetoothDevice device = panelDevice(fragment, controller);
         if (device == null || !controller.isAirPods(device)) return;
         controller.onPanelOpened(device);
+        boolean installed = false;
         try {
             ClassLoader loader = fragment.getClass().getClassLoader();
             Class<?> selectorClass = Class.forName(SELECTOR_SETTINGS_CLASS, false, loader);
@@ -75,9 +76,14 @@ final class QuickNoiseInjector {
             synchronized (INSTALLED) {
                 INSTALLED.put(fragment, injection);
             }
+            installed = true;
             Logx.i("quick noise selector installed");
         } catch (Throwable error) {
             Logx.w("quick noise selector failed", error);
+        } finally {
+            // Without an installed injection release() never runs, so the panel would stay
+            // marked open and keep ATT plus AACP retries alive in the background.
+            if (!installed) controller.onPanelClosed();
         }
     }
 
@@ -87,6 +93,25 @@ final class QuickNoiseInjector {
             injection = INSTALLED.remove(fragment);
         }
         if (injection != null) injection.release();
+    }
+
+    /** The pair the official panel shows (its view model's DeviceInfo), else the connected pair. */
+    private static BluetoothDevice panelDevice(Object fragment, AirPodsController controller) {
+        try {
+            java.lang.reflect.Field field = fragment.getClass().getDeclaredField("viewModel");
+            field.setAccessible(true);
+            Object viewModel = field.get(fragment);
+            Object info = viewModel == null ? null : viewModel.getClass().getField("b").get(viewModel);
+            Object mac = info == null ? null : info.getClass().getMethod("getMac").invoke(info);
+            if (mac instanceof String && android.bluetooth.BluetoothAdapter.checkBluetoothAddress((String) mac)) {
+                android.bluetooth.BluetoothManager manager = (android.bluetooth.BluetoothManager)
+                        controller.context().getSystemService(Context.BLUETOOTH_SERVICE);
+                android.bluetooth.BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
+                if (adapter != null) return adapter.getRemoteDevice((String) mac);
+            }
+        } catch (Throwable ignored) {
+        }
+        return controller.findActiveAirPods();
     }
 
     private static Object newItem(Class<?> itemClass, int id, String text, String action,

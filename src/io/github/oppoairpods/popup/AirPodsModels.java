@@ -73,11 +73,4 @@ final class AirPodsModels {
         }
         return null;
     }
-
-    static String displayName(String modelNumber, String fallback) {
-        Model model = fromModelNumber(modelNumber);
-        if (model != null) return model.name;
-        model = fromName(fallback);
-        return model != null ? model.name : (fallback == null || fallback.isEmpty() ? "AirPods" : fallback);
-    }
 }

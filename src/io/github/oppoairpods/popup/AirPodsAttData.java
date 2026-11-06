@@ -12,6 +12,10 @@ final class AirPodsAttData {
     static final int HANDLE_HEARING_AID = 0x2A;
     static final int CCCD_HEARING_AID = 0x2B;
 
+    private static final int TRANSPARENCY_SIZE = 100;
+    private static final int OWN_VOICE_SIZE = 104;
+    private static final int OWN_VOICE_OFFSET = 100;
+
     private AirPodsAttData() {}
 
     static final class Settings {
@@ -31,20 +35,30 @@ final class AirPodsAttData {
         float ownVoiceAmplification;
 
         static Settings defaults() {
-            Settings value = new Settings();
-            value.netAmplification = 0.5f;
-            value.balance = 0.5f;
-            return value;
+            return new Settings();
+        }
+
+        /** Inverse of parse(): net is the mean of both ears and balance is right minus left. */
+        void setAmpBalance(float net, float newBalance) {
+            netAmplification = clamp(net, -1f, 1f);
+            balance = clamp(newBalance, -1f, 1f);
+            leftAmplification = clamp(netAmplification - balance / 2f, -1f, 1f);
+            rightAmplification = clamp(netAmplification + balance / 2f, -1f, 1f);
+        }
+
+        void setEq(int band, float value, boolean left, boolean right) {
+            if (left) leftEq[band] = value;
+            if (right) rightEq[band] = value;
         }
     }
 
     static Settings parseTransparency(byte[] data) {
-        if (data == null || data.length < 100) return null;
+        if (data == null || data.length < TRANSPARENCY_SIZE) return null;
         return parse(data, true);
     }
 
     static Settings parseHearingAid(byte[] data) {
-        if (data == null || data.length < 104) return null;
+        if (data == null || data.length < OWN_VOICE_SIZE) return null;
         return parse(data, false);
     }
 
@@ -68,41 +82,51 @@ final class AirPodsAttData {
         value.rightConversationBoost = buffer.getFloat() > 0.5f;
         value.rightAmbientNoiseReduction = buffer.getFloat();
         if (buffer.remaining() >= 4) value.ownVoiceAmplification = buffer.getFloat();
-        value.netAmplification = (value.leftAmplification + value.rightAmplification) / 2f;
-        value.balance = value.rightAmplification - value.leftAmplification;
+        value.netAmplification = clamp((value.leftAmplification + value.rightAmplification) / 2f, -1f, 1f);
+        value.balance = clamp(value.rightAmplification - value.leftAmplification, -1f, 1f);
         return value;
     }
 
     static byte[] buildTransparency(Settings value, byte[] current) {
-        byte[] data = current != null && current.length >= 104
-                ? Arrays.copyOf(current, 104) : new byte[104];
+        // Own-voice amplification only exists on firmware that reports the 104-byte value.
+        int size = current != null && current.length >= OWN_VOICE_SIZE ? OWN_VOICE_SIZE : TRANSPARENCY_SIZE;
+        byte[] data = new byte[size];
         ByteBuffer buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
         buffer.putFloat(0, value.transparencyEnabled ? 1f : 0f);
-        putSettings(buffer, value, 4, 52, 100);
+        putSettings(buffer, value);
         return data;
     }
 
+    /**
+     * Returns null without a template read from the device: the payload starts with a device-owned
+     * header, and writing a made-up one could overwrite the audiogram stored on the AirPods.
+     */
     static byte[] buildHearingAid(Settings value, byte[] current) {
-        byte[] data = current != null && current.length >= 104
-                ? Arrays.copyOf(current, 104) : new byte[104];
+        if (current == null || current.length < OWN_VOICE_SIZE) return null;
+        byte[] data = Arrays.copyOf(current, OWN_VOICE_SIZE);
         data[2] = 0x64;
         ByteBuffer buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
-        putSettings(buffer, value, 4, 52, 100);
+        putSettings(buffer, value);
         return data;
     }
 
-    private static void putSettings(ByteBuffer buffer, Settings value, int leftEqOffset,
-                                    int rightEqOffset, int ownVoiceOffset) {
-        for (int i = 0; i < 8; i++) buffer.putFloat(leftEqOffset + i * 4, value.leftEq[i]);
+    private static void putSettings(ByteBuffer buffer, Settings value) {
+        for (int i = 0; i < 8; i++) buffer.putFloat(4 + i * 4, value.leftEq[i]);
         buffer.putFloat(36, value.leftAmplification);
         buffer.putFloat(40, value.leftTone);
         buffer.putFloat(44, value.leftConversationBoost ? 1f : 0f);
         buffer.putFloat(48, value.leftAmbientNoiseReduction);
-        for (int i = 0; i < 8; i++) buffer.putFloat(rightEqOffset + i * 4, value.rightEq[i]);
+        for (int i = 0; i < 8; i++) buffer.putFloat(52 + i * 4, value.rightEq[i]);
         buffer.putFloat(84, value.rightAmplification);
         buffer.putFloat(88, value.rightTone);
         buffer.putFloat(92, value.rightConversationBoost ? 1f : 0f);
         buffer.putFloat(96, value.rightAmbientNoiseReduction);
-        buffer.putFloat(ownVoiceOffset, value.ownVoiceAmplification);
+        if (buffer.capacity() >= OWN_VOICE_SIZE) {
+            buffer.putFloat(OWN_VOICE_OFFSET, value.ownVoiceAmplification);
+        }
+    }
+
+    private static float clamp(float value, float min, float max) {
+        return Math.max(min, Math.min(max, value));
     }
 }

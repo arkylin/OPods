@@ -16,10 +16,6 @@ final class ProtocolInfo {
         return "SP " + key + " · 手机本地；" + event + " · 手机协同";
     }
 
-    static String aacpRead(int id) {
-        return "AACP 读取 0x" + hex(id) + " · 设备回传";
-    }
-
     static String eq(int state, String bands) {
         return "AACP 63 00 05 00 01 " + hex(state) + " " + bands + " · 设备";
     }
@@ -36,20 +32,12 @@ final class ProtocolInfo {
         return "SP " + key + " · 手机本地，不发送";
     }
 
-    static String localAndDevice(String key, String packet) {
-        return packet + "；" + local(key);
-    }
-
     static String official(String action) {
         return "Intent " + action + " · 官方页面/手机协同";
     }
 
-    static String bluetooth(String value) {
-        return "Bluetooth " + value + " · 手机系统";
-    }
-
     static String rename() {
-        return "AACP 1A 00 01 <len> 00 <UTF-8> · 设备；同时写本机别名";
+        return "AACP 1A 00 01 <len> 00 <UTF-8> · 设备";
     }
 
     private static String hex(int value) {

@@ -11,18 +11,19 @@
 
 ## 进程与作用域
 
-`META-INF/xposed/scope.list` 只声明两个包：
+`META-INF/xposed/scope.list` 只声明三个包：
 
 | 包名 | 作用 |
 | --- | --- |
-| `com.heytap.mydevices` | 官方弹窗、扫描回调、设置页、AACP 控制通道和状态缓存 |
+| `com.heytap.mydevices` | 官方弹窗、开盖 PTC 回调、设置页、AACP 控制通道和状态缓存 |
+| `com.heytap.accessory` | 官方持久扫描器交出 Apple 开盖结果时，让官方 FusionWakeup 唤醒 MyDevices |
 | `com.android.bluetooth` | 过滤 ColorOS 写入 AirPods 的 `DISABLE_OFF` 帧 |
 
 `META-INF/xposed/java_init.list` 唯一入口是
 `io.github.oppoairpods.popup.AirPodsMyDevicesModule`。`module.prop` 使用
 `minApiVersion=101`、`targetApiVersion=101` 和 `staticScope=true`。
 
-`com.heytap.accessory`、`com.oplus.wirelesssettings`、`com.oplus.melody`、Launcher、
+`com.oplus.wirelesssettings`、`com.oplus.melody`、Launcher、
 SystemUI 和 Settings 均不在作用域内。早期“蓝牙设置 > 耳机功能”实验路径已删除，最终入口
 只存在于 MyDevices 的 AirPods 设置页。
 
@@ -35,9 +36,9 @@ com.android.bluetooth  ───> AapOffFilter
 
 com.heytap.mydevices  ───> MyDevices hook set
                             ├─ DeviceApplication.onCreate
-                            ├─ AirPods 特性/扫描策略
-                            ├─ 官方广播和 PTC 扫描回调
-                            ├─ 官方设置 Fragment/Activity
+                            ├─ AirPods 特性开关与官方电量策略
+                            ├─ 官方 ACL 广播与弹窗生命周期
+                            ├─ 官方设置 Fragment/Activity 与详情页
                             └─ DisconnectFilter
 ```
 
@@ -48,27 +49,47 @@ ColorOS 私有 DEX，因此以下类名、方法名和混淆名属于版本相�
 - `com.heytap.mydevices.plugin.airpods.ui.AirpodsSettingActivity`
 - `com.heytap.mydevices.plugin.airpods.ui.AirpodsSettingPreferencesFragment`
 - `com.heytap.mydevices.plugin.airpods.core.AirpodsBluetoothManager`
-- `com.heytap.mydevices.plugin.airpods.core.AirpodsScanHelper$registerPtc$2$a`
+- `com.heytap.mydevices.plugin.airpods.core.AirpodsScanPolicy`
 - `com.heytap.mydevices.DeviceApplication`
 - `aa.b2$a`
 
-3.4.20 对关键路径增加了兼容回退：`AirpodsScanPolicy` 的管理器字段按“带有 registerPtc 方法的字段类型”查找，
+3.4.20 对关键路径增加了兼容回退：
 `SeekBarPreference` 的绑定方法和 `SeekBar`/`TextView` 字段按签名与类型查找，`DisconnectFilter` 优先用
 设备自身的 `isConnected` 判断；模块创建的滑杆通过 `SliderRegistry` 标记，只装饰自己的实例。其余 COUI
 混淆方法名和特性开关仍保留已知名契约，不能把“可回退”理解为大版本升级后必然可用。
 
-## 官方弹窗与自动连接
+## 官方弹窗与设备选择
 
-开盖信息来自官方 PTC 扫描回调收到的 Apple proximity 数据。`AppleAdvertisement` 只解析
-最小必要字段：产品 ID 和盒盖状态。盒盖打开时，`AirPodsController` 会：
+连接本身完全由 ColorOS 完成，模块不发起 A2DP/HFP 或任何 profile 连接（3.4.43 删除）。
+官方 `AirpodsManager$c` 收到 `ACL_CONNECTED` 后，`AirPodsController` 才启动官方
+`AirpodsDiscoveryActivity`，同时传入 `bluetooth_device` 和 `device_model`。设置页打开时
+不会重复弹窗；3.5 秒内也不会重复启动。
 
-1. 绑定已配对的 AirPods 地址，建立或复用控制状态。
-2. 通过 `BluetoothA2dp`/`BluetoothHeadset` profile proxy 请求连接。
-3. 在 0、1.8 和 4.2 秒三个时间点补一次连接，处理耳机仍被其他设备占用的场景。
-4. 启动官方 `AirpodsDiscoveryActivity`，同时传入 `bluetooth_device` 和 `device_model`。
+开盖弹窗走官方 PTC，模块只补全官方流程：
 
-ACL 连接广播也会触发同一路径。设置页打开时不会重复弹窗；3.5 秒内也不会重复启动。
-自动连接是否启用保存在 MyDevices 自己的 SharedPreferences `oppo_airpods_enhanced` 中。
+1. MyDevices 的官方 `registerPtc` 把 Apple `0x004C` 开盖过滤注册给 Accessory 的官方持久扫描器。
+   ROM 写死了 `07 19 07` / `07 0F 00` 三字节前缀，模块把 `setManufacturerData` 的两个重载都放宽到
+   `07 19` / `07 0F`，让 AirPods 5 等新机型能匹配。
+2. 扫描结果经官方 PTC listener，或经 Accessory 侧的 FusionWakeup → CoreService 回到 MyDevices；
+   Accessory 侧模块会把官方 AirPods listener 置空以走唤醒路径（官方调用点都判空）。
+3. `AppleAdvertisement` 解析 `0x07` 邻近消息（字段位置与 LibrePods 一致）：盒盖、型号、
+   10% 档位电量、充电、佩戴、连接状态；最后 16 字节是加密部分。
+4. `AirPodsController.onCaseAdvertisement` 做身份校验：系统已解析的身份地址直接比对；否则用
+   AirPods 经 AACP `0x30/0x31` 下发的 IRK 校验 RPA（`ProximityCrypto.verifyRpa`，即蓝牙规范 ah 函数）。
+   有 ENC 密钥时解密出精确电量，记录到“最近开盖广播”。
+5. 只有通过校验的那副（或用户允许时、还没拿到密钥的那副）才启动官方 `AirpodsDiscoveryActivity`。
+
+限制：ColorOS 官方扫描器只在亮屏（`isInteractive`）时并入 AirPods 过滤，息屏开盖不会弹窗；
+官方主进程没被 LSPosed 注入时，开盖唤醒依赖 `:cards` 进程还在运行。
+
+模块需要知道“当前页面显示的是哪副耳机”时，按以下顺序取设备：
+
+1. 官方给出的设备：弹窗 Intent 的 `bluetooth_device` 或弹窗 ViewModel 的 `getBluetoothDevice()`，
+   设置页 ViewModel 的 `getBluetoothDevice()`，详情面板 ViewModel 中 `DeviceInfo.getMac()`。
+2. 回退：已配对 AirPods 中当前持有 ACL 的那副，其次是已附着的那副，最后才是第一副。
+
+切换到另一副耳机时，`AirPodsController` 会停止旧会话，并清空电量、控制值、待发送队列和
+ATT 模板，避免把上一副的设置写进新的一副。用户保存的设备设置按耳机地址分别保存。
 
 ## AACP 控制通道
 
@@ -79,9 +100,19 @@ ACL 连接广播也会触发同一路径。设置页打开时不会重复弹窗�
 - Service UUID：`74ec2172-0bad-4d01-8f77-997b2be0722a`
 - 帧头：`04 00 04 00`
 
-连接完成后依次发送握手、能力声明和通知订阅，再周期读取输入流。读循环断开时使用指数退避
-重连（1 秒到 30 秒），写命令有单独锁。若通道尚未建立，界面操作会进入有限长度的待发送
-队列，通道打开后再补发；相同逻辑也用于 EQ。
+连接完成后依次发送握手、能力声明和通知订阅（不请求 IRK/ENC 等密钥）。只有还没收到任何数据时，
+才会在 1.1 秒和 6 秒各重发一次初始化。所有写操作都在会话自己的单写线程上执行，调用方
+（通常是主线程）不会被蓝牙 I/O 或初始化间隔阻塞。若通道尚未建立，界面操作会进入有限长度的
+待发送队列，通道打开后再补发；相同逻辑也用于 EQ。
+
+链路重试只有一个判断：官方 AirPods 弹窗、设置页或详情面板是否可见
+（`AirPodsController.wantsAacpRetries()`）。可见时按 2–60 秒指数退避重连；不可见时链路一断
+就停止会话，等下一次官方页面出现。首连另有最多 3 次、间隔 1.2 秒的热身重试，只在 ACL
+仍在且本次连接没有收到任何数据时进行，用来拿到第一包电量。ACL 断开时立即停止会话，并把
+官方弹窗、耳机页和 DeviceInfo 刷成断开状态。
+
+ATT（PSM 31）只在官方页面打开期间运行。通透和助听参数必须先从本次连接读到，才允许写回；
+写入沿用设备返回的数据头，读到之前面板里的相关控件保持禁用。
 
 `AirPodsController` 是 MyDevices 进程内的单例状态源，保存：
 
@@ -100,7 +131,24 @@ ACL 连接广播也会触发同一路径。设置页打开时不会重复弹窗�
 `OfficialDeviceStateBridge` 重新触发官方回调；不再按相同数组去重，因此不需要 Hook
 `com.android.systemui`。
 
-状态只存在目标官方进程的内存和该包自己的 SharedPreferences 中，不向外导出 Provider 或文件接口。
+状态只存在目标官方进程的内存、该包自己的 SharedPreferences，以及供 `:cards` 与主进程共享
+电量快照的私有文件 `oppo_airpods_state.properties` 中，不向外导出 Provider 或文件接口。
+
+## 与 LibrePods 对齐的手机端行为
+
+这些行为都在官方 `:cards` 进程内、AACP 通道在线时运行，不新建进程、Service 或 Receiver：
+
+- 头部手势接挂电话：开关打开且 AACP 在线时，在官方进程内监听 `AudioManager` 模式变化；
+  响铃时开始头部追踪，`HeadGestureTracker` 识别到点头调用 `TelecomManager.acceptRingingCall()`，
+  摇头调用 `endCall()`（MyDevices 持有 `MODIFY_PHONE_STATE`），不可用时改发耳机按键（短按接听、长按拒接）。
+- 对话感知手机端：AACP `0x4B` 状态 `01/02` 开始说话、`06/08/09` 结束；按设置把媒体音量降到
+  当前音量的比例或最大音量的上限，可同时暂停，结束后恢复。
+- 取下时断开音频：双耳都不在耳内 3 秒后断开 A2DP/HFP（ACL 与 AACP 保留），戴回时打开官方弹窗，
+  由官方流程恢复音频。
+- 耳机调节 EQ（AACP `0x53`）、心率开关（`0x30`）以及 LibrePods 已定义但未开放的控制项：
+  只写入，结果以耳机回报为准；面板标为“实验”。
+- 做不到的 LibrePods 功能（相机遥控、自动接管、多设备、伪装苹果设备、媒体辅助、查找、高质量
+  双向音频）在面板对应位置保留入口并写明原因。
 
 ## 官方设置页注入
 

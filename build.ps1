@@ -7,7 +7,7 @@ param(
     [string]$KeystorePassword = 'android',
     [string]$KeyAlias = 'androiddebugkey',
     [string]$KeyPassword = 'android',
-    [string]$Output = 'dist/OPPO-AirPods-Enhanced-v3.4.47.apk'
+    [string]$Output = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +87,12 @@ function Resolve-SdkTool {
 
 foreach ($path in @($manifest, $resDir, $xposedDir, $libxposed)) {
     if (-not (Test-Path -LiteralPath $path)) { throw ('Required path missing: ' + $path) }
+}
+if (-not $Output) {
+    [xml]$manifestXml = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifest
+    $versionName = [string]$manifestXml.manifest.versionName
+    if (-not $versionName) { throw 'AndroidManifest.xml has no versionName' }
+    $Output = 'dist/OPPO-AirPods-Enhanced-v' + $versionName + '.apk'
 }
 foreach ($command in @('javac', 'jar', 'keytool')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -216,13 +222,25 @@ if (Test-Path -LiteralPath $outputPath) {
 }
 
 Write-Host 'Signing APK...'
-& $apksigner sign --ks $Keystore --ks-key-alias $KeyAlias `
-    --ks-pass ('pass:' + $KeystorePassword) --key-pass ('pass:' + $KeyPassword) `
-    --out $outputPath $aligned
-if ($LASTEXITCODE -ne 0) { throw 'apksigner failed' }
-
-& $apksigner verify $outputPath | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'apksigner verification failed' }
+# Hand the passwords over through the environment so they never appear on a command line.
+# Newer JDKs print restricted-method warnings to stderr; like javac above, gate on exit codes.
+$env:OPODS_KS_PASS = $KeystorePassword
+$env:OPODS_KEY_PASS = $KeyPassword
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $apksigner sign --ks $Keystore --ks-key-alias $KeyAlias `
+        --ks-pass env:OPODS_KS_PASS --key-pass env:OPODS_KEY_PASS `
+        --out $outputPath $aligned 2>&1 | Out-Host
+    $signExit = $LASTEXITCODE
+    & $apksigner verify $outputPath 2>&1 | Out-Null
+    $verifyExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEap
+    Remove-Item Env:OPODS_KS_PASS, Env:OPODS_KEY_PASS -ErrorAction SilentlyContinue
+}
+if ($signExit -ne 0) { throw 'apksigner failed' }
+if ($verifyExit -ne 0) { throw 'apksigner verification failed' }
 
 $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash
 $size = (Get-Item -LiteralPath $outputPath).Length

@@ -1,5 +1,6 @@
 package io.github.oppoairpods.popup;
 
+import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanRecord;
@@ -124,34 +125,41 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     }
 
     /**
-     * The ROM's PTC filter is pinned to AirPods 4 era proximity prefixes. Keep the
-     * manufacturer id and subtype, but let newer AirPods (for example AirPods 5)
-     * match by the first two bytes.
+     * The ROM's PTC filter is pinned to AirPods 4 era proximity prefixes ({7,25,7} / {7,15,0}).
+     * Keep the manufacturer id and the message type/length, but let newer AirPods (for example
+     * AirPods 5) match on the first two bytes. Identity is checked later with the IRK.
      */
     private void hookAirPodsScanFilter(ClassLoader loader) {
         try {
             Class<?> builder = Class.forName("android.bluetooth.le.ScanFilter$Builder", false, loader);
+            int hooked = 0;
             for (Method method : builder.getDeclaredMethods()) {
-                if (!"setManufacturerData".equals(method.getName())
-                        || method.getParameterCount() != 3
-                        || method.getParameterTypes()[0] != int.class
-                        || method.getParameterTypes()[1] != byte[].class) continue;
+                if (!"setManufacturerData".equals(method.getName())) continue;
+                Class<?>[] types = method.getParameterTypes();
+                final boolean withMask = types.length == 3 && types[2] == byte[].class;
+                if ((types.length != 2 && !withMask) || types[0] != int.class || types[1] != byte[].class) {
+                    continue;
+                }
                 hook(method).intercept(chain -> {
                     int manufacturer = (int) chain.getArg(0);
                     Object raw = chain.getArg(1);
                     if (manufacturer == 76 && raw instanceof byte[]) {
                         byte[] data = (byte[]) raw;
-                        if (data.length >= 2 && data[0] == 7 && (data[1] == 25 || data[1] == 15)) {
+                        // Only the ROM's three-byte AirPods filters; a broadened one is left alone.
+                        if (data.length > 2 && data[0] == 7 && (data[1] == 25 || data[1] == 15)) {
                             byte[] broadened = new byte[]{7, data[1]};
-                            byte[] mask = new byte[]{(byte) 0xFF, (byte) 0xFF};
                             Logx.i("AirPods scan filter broadened for subtype " + (data[1] & 0xFF));
-                            return chain.proceed(new Object[]{manufacturer, broadened, mask});
+                            return withMask
+                                    ? chain.proceed(new Object[]{manufacturer, broadened,
+                                            new byte[]{(byte) 0xFF, (byte) 0xFF}})
+                                    : chain.proceed(new Object[]{manufacturer, broadened});
                         }
                     }
                     return chain.proceed();
                 });
-                Logx.i("AirPods scan filter hook installed");
+                hooked++;
             }
+            Logx.i("AirPods scan filter hook installed (" + hooked + " overloads)");
         } catch (Throwable error) {
             Logx.w("AirPods scan filter hook failed", error);
         }
@@ -337,6 +345,11 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         }
     }
 
+    /**
+     * Accessory: when the official persistent scanner hands an Apple proximity result to
+     * FusionProvider, clear the AirPods discovery listener so the official FusionWakeup path
+     * starts MyDevices CoreService with the service node. Official callers all null-check it.
+     */
     private void installAccessoryPtc(ClassLoader loader) {
         try {
             Class<?> output = Class.forName(
@@ -505,49 +518,69 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         try {
             Class<?> activity = Class.forName(
                     "com.heytap.mydevices.plugin.airpods.ui.AirpodsDiscoveryActivity", false, loader);
-            Method lifecycle;
-            try {
-                lifecycle = activity.getDeclaredMethod("onResume");
-            } catch (NoSuchMethodException ignored) {
-                lifecycle = activity.getDeclaredMethod("onCreate", Bundle.class);
-            }
-            hook(lifecycle).intercept(chain -> {
+            // Resolve both first: a visible flag without its matching onPause hook would stay set.
+            Method onResume = activity.getDeclaredMethod("onResume");
+            Method onPause = activity.getDeclaredMethod("onPause");
+            hook(onResume).intercept(chain -> {
                 OfficialCoreBridge.capture(chain.getThisObject());
                 Object result = chain.proceed();
                 try {
                     Context context = appContext != null ? appContext : currentApplication();
                     if (context != null) {
                         AirPodsController controller = AirPodsController.get(context);
-                        BluetoothDevice device = controller.findBondedAirPods();
-                        if (device != null) controller.ensureBatterySession(device);
-                        controller.setAacpRetries(true);
+                        controller.onPopupVisible(discoveryDevice(chain.getThisObject(), controller));
                     }
                 } catch (Throwable error) {
                     Logx.w("discovery battery session failed", error);
                 }
                 return result;
             });
-            try {
-                Method onPause = activity.getDeclaredMethod("onPause");
-                hook(onPause).intercept(chain -> {
-                    Object result = chain.proceed();
-                    try {
-                        Context context = appContext != null ? appContext : currentApplication();
-                        if (context != null) {
-                            AirPodsController.get(context).setAacpRetries(false);
-                        }
-                    } catch (Throwable error) {
-                        Logx.w("discovery battery pause handling failed", error);
-                    }
-                    return result;
-                });
-            } catch (Throwable error) {
-                Logx.w("discovery battery pause hook failed", error);
-            }
+            hook(onPause).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    if (context != null) AirPodsController.get(context).onPopupHidden();
+                } catch (Throwable error) {
+                    Logx.w("discovery battery pause handling failed", error);
+                }
+                return result;
+            });
             Logx.i("official AirPods discovery battery hook installed");
         } catch (Throwable error) {
             Logx.w("official AirPods discovery battery hook failed", error);
         }
+    }
+
+    /** The pair the official popup was started for: its Intent first, then its view model. */
+    private static BluetoothDevice discoveryDevice(Object activity, AirPodsController controller) {
+        BluetoothDevice device = null;
+        try {
+            if (activity instanceof Activity) {
+                Intent intent = ((Activity) activity).getIntent();
+                if (intent != null) {
+                    device = intent.getParcelableExtra("bluetooth_device", BluetoothDevice.class);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        if (device == null) device = viewModelDevice(activity);
+        return officialDevice(device, controller);
+    }
+
+    private static BluetoothDevice viewModelDevice(Object owner) {
+        try {
+            Object viewModel = call(owner, "getViewModel");
+            if (viewModel == null) return null;
+            Object value = viewModel.getClass().getMethod("getBluetoothDevice").invoke(viewModel);
+            return value instanceof BluetoothDevice ? (BluetoothDevice) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static BluetoothDevice officialDevice(BluetoothDevice candidate, AirPodsController controller) {
+        if (candidate != null && controller.isAirPods(candidate)) return candidate;
+        return controller.findActiveAirPods();
     }
 
     private void hookDetailPanel(ClassLoader loader) {
@@ -556,6 +589,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     "com.heytap.mydevices.plugin.airpods.ui.AirpodsDetailPanelFragment",
                     false, loader);
             Method bind = panel.getDeclaredMethod("bindPanelBodyViews", View.class);
+            Method init = panel.getDeclaredMethod("initView", View.class);
+            Method clear = panel.getDeclaredMethod("clearPanelBodyViewRefs");
             hook(bind).intercept(chain -> {
                 Object result = chain.proceed();
                 try {
@@ -565,7 +600,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 }
                 return result;
             });
-            Method init = panel.getDeclaredMethod("initView", View.class);
             hook(init).intercept(chain -> {
                 Object result = chain.proceed();
                 try {
@@ -575,7 +609,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 }
                 return result;
             });
-            Method clear = panel.getDeclaredMethod("clearPanelBodyViewRefs");
             hook(clear).intercept(chain -> {
                 QuickNoiseInjector.release(chain.getThisObject());
                 return chain.proceed();
@@ -839,6 +872,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     false, loader);
             Method update = content.getDeclaredMethod("t0", int[].class);
             hook(update).intercept(chain -> {
+                // Our own repaint carries nothing new from the ROM.
+                if (OfficialBatteryBridge.applying()) return chain.proceed();
                 Object target = chain.getThisObject();
                 int[] battery = (int[]) chain.getArg(0);
                 OfficialCoreBridge.capture(target);
@@ -847,8 +882,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     Context context = appContext != null ? appContext : currentApplication();
                     if (context != null) {
                         AirPodsController controller = AirPodsController.get(context);
-                        BluetoothDevice device = controller.findBondedAirPods();
-                        if (device != null) controller.ensureBatterySession(device);
+                        controller.ensureBatterySession(officialDevice(viewModelDevice(target), controller));
                         OfficialBatteryBridge.onOfficialPopup(target, battery, controller);
                     }
                 } catch (Throwable error) {
@@ -939,26 +973,36 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         Object raw = info.getClass().getMethod("getServiceData").invoke(info);
         if (!(raw instanceof byte[])) return;
         byte[] data = (byte[]) raw;
+        String bleAddress = terminalAddress(node);
         int logIndex = PTC_LOGS.getAndIncrement();
         if (logIndex < 20) {
             Logx.i("PTC service data len=" + data.length + " hex=" + hexPrefix(data));
         }
         AppleAdvertisement.LidInfo lid = AppleAdvertisement.parse(data);
-        if (logIndex < 20 && lid == null) {
-            Logx.i("PTC service data not parsed as AirPods proximity");
+        if (lid == null) {
+            if (logIndex < 20) Logx.i("PTC service data not parsed as AirPods proximity");
+            return;
         }
-        if (lid == null || !lid.lidOpen) {
-            if (logIndex < 20 && lid != null) {
-                Logx.i("PTC service data parsed product=0x"
-                        + Integer.toHexString(lid.product) + " lidOpen=" + lid.lidOpen);
+        if (!lid.lidOpen) {
+            if (logIndex < 20) {
+                Logx.i("PTC service data parsed product=0x" + Integer.toHexString(lid.product) + " lidOpen=false");
             }
             return;
         }
         Context context = appContext != null ? appContext : currentApplication();
         if (context == null) return;
-        AirPodsController controller = AirPodsController.get(context);
-        BluetoothDevice device = controller.findBondedAirPods();
-        controller.onCaseAdvertisement(device, lid.model, true);
+        AirPodsController.get(context).onCaseAdvertisement(bleAddress, lid);
+    }
+
+    /** BLE address the official scanner reported (an RPA unless the stack resolved it). */
+    private static String terminalAddress(Object node) {
+        try {
+            Object terminal = node.getClass().getMethod("getTerminalInfo").invoke(node);
+            Object value = terminal == null ? null : terminal.getClass().getMethod("getDeviceAddress").invoke(terminal);
+            return value instanceof String ? (String) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static String hexPrefix(byte[] data) {

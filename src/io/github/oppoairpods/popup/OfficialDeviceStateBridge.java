@@ -20,6 +20,7 @@ final class OfficialDeviceStateBridge {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final AtomicBoolean APPLYING = new AtomicBoolean();
     private static final AtomicBoolean SCHEDULED = new AtomicBoolean();
+    private static final AtomicBoolean CLEAR_SCHEDULED = new AtomicBoolean();
     private static final AtomicBoolean ERROR_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean POLICY_MISSING_LOGGED = new AtomicBoolean();
     private static volatile WeakReference<Object> policy = new WeakReference<>(null);
@@ -52,12 +53,12 @@ final class OfficialDeviceStateBridge {
 
     static void schedule(AirPodsController controller) {
         if (controller == null || APPLYING.get() || !controller.hasBatterySnapshot()) return;
-        schedule(controller, false);
+        schedule(controller, false, SCHEDULED);
     }
 
     static void clear(AirPodsController controller) {
         if (controller == null || APPLYING.get()) return;
-        schedule(controller, true);
+        schedule(controller, true, CLEAR_SCHEDULED);
     }
 
     /** Applies a battery snapshot received from the UI (:cards) process over the official IPC. */
@@ -115,10 +116,10 @@ final class OfficialDeviceStateBridge {
         applyTarget(target, device, battery);
     }
 
-    private static void schedule(AirPodsController controller, boolean clear) {
-        if (!SCHEDULED.compareAndSet(false, true)) return;
+    private static void schedule(AirPodsController controller, boolean clear, AtomicBoolean flag) {
+        if (!flag.compareAndSet(false, true)) return;
         MAIN.post(() -> {
-            SCHEDULED.set(false);
+            flag.set(false);
             apply(controller, clear);
         });
     }

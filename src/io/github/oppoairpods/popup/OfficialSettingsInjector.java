@@ -5,7 +5,6 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.AttributeSet;
-import android.widget.Toast;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
@@ -111,7 +110,7 @@ final class OfficialSettingsInjector {
                 }
             } catch (Throwable ignored) {
             }
-            return controller.findBondedAirPods();
+            return controller.findActiveAirPods();
         }
 
         private void addDashboard(Object group) throws Exception {
@@ -128,45 +127,6 @@ final class OfficialSettingsInjector {
             refreshers.add(() -> {
                 String model = controller.modelName();
                 set(preference, "setSummary", model + " · 音频、操控、连接、听力与设备信息");
-            });
-        }
-
-        private void addSwitch(Object group, String key, String title, String summary,
-                               Supplier<Boolean> getter, Consumer<Boolean> setter) throws Exception {
-            Object preference = newPreference("com.coui.appcompat.preference.COUISwitchPreference",
-                    new Class<?>[]{Context.class}, new Object[]{context});
-            set(preference, "setKey", "oppo_airpods_" + key);
-            set(preference, "setTitle", title);
-            set(preference, "setSummary", summary);
-            set(preference, "setChecked", getter.get());
-            set(preference, "setPersistent", false);
-            setChangeListener(preference, value -> {
-                setter.accept(value instanceof Boolean && (Boolean) value);
-                return true;
-            });
-            add(group, preference);
-            refreshers.add(() -> set(preference, "setChecked", getter.get()));
-        }
-
-        private void addList(Object group, String key, String title, String[] labels, String[] values,
-                             Supplier<String> getter, Consumer<String> setter) throws Exception {
-            Object preference = newPreference("com.coui.appcompat.preference.COUIListPreference",
-                    new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
-            set(preference, "setKey", "oppo_airpods_" + key);
-            set(preference, "setTitle", title);
-            setListEntries(preference, labels, values);
-            
-            set(preference, "setValue", getter.get());
-            set(preference, "setPersistent", false);
-            setChangeListener(preference, value -> {
-                if (value != null) setter.accept(String.valueOf(value));
-                return true;
-            });
-            add(group, preference);
-            refreshers.add(() -> {
-                String current = getter.get();
-                set(preference, "setValue", current);
-                set(preference, "setSummary", label(labels, values, current));
             });
         }
 
@@ -243,66 +203,6 @@ final class OfficialSettingsInjector {
             }
         }
 
-        private void addEq(Object group) throws Exception {
-            Object preference = newPreference("com.coui.appcompat.preference.COUIListPreference",
-                    new Class<?>[]{Context.class, AttributeSet.class}, new Object[]{context, null});
-            String[] labels = {"关闭", "流行", "摇滚", "古典", "人声", "低音"};
-            String[] values = {"off", "pop", "rock", "classical", "vocal", "bass"};
-            String saved = controller.prefs().getString("equalizer_preset", "off");
-            set(preference, "setKey", "oppo_airpods_equalizer");
-            set(preference, "setTitle", "均衡器");
-            setListEntries(preference, labels, values);
-            
-            set(preference, "setValue", saved);
-            set(preference, "setSummary", label(labels, values, saved));
-            set(preference, "setPersistent", false);
-            setChangeListener(preference, value -> {
-                String preset = value == null ? "off" : String.valueOf(value);
-                controller.prefs().edit().putString("equalizer_preset", preset).apply();
-                int[] eq = eqFor(preset);
-                controller.sendEqualizer(eq[0], eq[1], eq[2], eq[3]);
-                set(preference, "setSummary", label(labels, values, preset));
-                return true;
-            });
-            add(group, preference);
-        }
-
-        private void addInfo(Object group) throws Exception {
-            Object preference = newPreference("com.coui.appcompat.preference.COUIJumpPreference",
-                    new Class<?>[]{Context.class}, new Object[]{context});
-            set(preference, "setKey", "oppo_airpods_info");
-            set(preference, "setTitle", "设备信息");
-            set(preference, "setPersistent", false);
-            setClickListener(preference, () -> {
-                Toast.makeText(context, controller.modelName() + "\n" + controller.batterySummary(),
-                        Toast.LENGTH_LONG).show();
-                return true;
-            });
-            add(group, preference);
-            refreshers.add(() -> {
-                String model = controller.modelName();
-                if (!controller.modelNumber().isEmpty()) model += " (" + controller.modelNumber() + ")";
-                set(preference, "setSummary", model + " · " + controller.batterySummary()
-                        + " · " + (controller.opened() ? "控制已连接" : "控制未连接"));
-            });
-        }
-
-        private static int[] eqFor(String preset) {
-            switch (preset) {
-                case "pop": return new int[]{2, 55, 50, 45};
-                case "rock": return new int[]{2, 60, 45, 55};
-                case "classical": return new int[]{2, 45, 50, 60};
-                case "vocal": return new int[]{2, 40, 55, 55};
-                case "bass": return new int[]{2, 70, 45, 40};
-                default: return new int[]{1, 50, 50, 50};
-            }
-        }
-
-        private static String label(String[] labels, String[] values, String current) {
-            for (int i = 0; i < values.length; i++) if (values[i].equals(current)) return labels[i];
-            return labels.length == 0 ? "" : labels[0];
-        }
-
         private Object newPreference(String name, Class<?>[] types, Object[] args) throws Exception {
             ClassLoader loader = fragment.get().getClass().getClassLoader();
             return Class.forName(name, false, loader).getConstructor(types).newInstance(args);
@@ -337,30 +237,6 @@ final class OfficialSettingsInjector {
                         }
                     }
                 }
-            }
-        }
-
-        private static void setListEntries(Object preference, String[] labels, String[] values) {
-            try {
-                java.lang.reflect.Field entries = null;
-                java.lang.reflect.Field entryValues = null;
-                for (Class<?> type = preference.getClass(); type != null; type = type.getSuperclass()) {
-                    for (java.lang.reflect.Field field : type.getDeclaredFields()) {
-                        if (field.getType() != CharSequence[].class) continue;
-                        if (field.getName().equals("X")) entries = field;
-                        if (field.getName().equals("Y")) entryValues = field;
-                    }
-                }
-                if (entries != null) {
-                    entries.setAccessible(true);
-                    entries.set(preference, labels);
-                }
-                if (entryValues != null) {
-                    entryValues.setAccessible(true);
-                    entryValues.set(preference, values);
-                }
-            } catch (Throwable error) {
-                Logx.w("list entries injection failed", error);
             }
         }
 

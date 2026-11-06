@@ -16,7 +16,7 @@ final class Logx {
     static final String TAG = "OPPOAirPods";
     private static final Object LOCK = new Object();
     private static volatile File file;
-    private static final String PROCESS = processName();
+    private static volatile String process;
 
     private Logx() {}
 
@@ -49,6 +49,36 @@ final class Logx {
         write("E", message, error);
     }
 
+    static String logPath() {
+        File target = file;
+        return target == null ? "未初始化" : target.getAbsolutePath();
+    }
+
+    /** Last lines of the debug log for sharing; null when there is none. */
+    static String tail(int maxLines) {
+        File target = file;
+        if (target == null || !target.exists()) return null;
+        synchronized (LOCK) {
+            try {
+                java.util.List<String> lines = java.nio.file.Files.readAllLines(
+                        target.toPath(), StandardCharsets.UTF_8);
+                int from = Math.max(0, lines.size() - maxLines);
+                return String.join("\n", lines.subList(from, lines.size()));
+            } catch (Throwable error) {
+                return null;
+            }
+        }
+    }
+
+    static void clear() {
+        File target = file;
+        if (target == null) return;
+        synchronized (LOCK) {
+            target.delete();
+            new File(target.getParentFile(), "debug.log.1").delete();
+        }
+    }
+
     private static void write(String level, String message, Throwable error) {
         File target = file;
         if (target == null) return;
@@ -62,7 +92,7 @@ final class Logx {
                 String time = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.ROOT).format(new Date());
                 StringBuilder line = new StringBuilder();
                 line.append(time).append(' ').append(level).append(" [")
-                        .append(PROCESS).append('/').append(Process.myPid()).append("] ")
+                        .append(processName()).append('/').append(Process.myPid()).append("] ")
                         .append(message).append('\n');
                 if (error != null) {
                     line.append(error.getClass().getName()).append(": ").append(error.getMessage()).append('\n');
@@ -82,10 +112,16 @@ final class Logx {
         }
     }
 
+    /** Resolved lazily: this class can load before bindApplication has set the process name. */
     private static String processName() {
+        String cached = process;
+        if (cached != null) return cached;
         try {
             String name = Application.getProcessName();
-            if (name != null && !name.isEmpty()) return name;
+            if (name != null && !name.isEmpty()) {
+                process = name;
+                return name;
+            }
         } catch (Throwable ignored) {
         }
         return "unknown";

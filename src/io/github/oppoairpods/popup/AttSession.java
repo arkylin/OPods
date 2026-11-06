@@ -15,6 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -75,34 +76,48 @@ final class AttSession {
         requests.shutdownNow();
     }
 
+    boolean isRunning() {
+        return running.get();
+    }
+
     boolean isConnected() {
         return connected;
     }
 
     void readAll() {
-        if (!running.get()) return;
-        requests.execute(() -> {
+        submit(() -> {
             readHandle(AirPodsAttData.HANDLE_TRANSPARENCY, listener::onTransparency);
             readHandle(AirPodsAttData.HANDLE_LOUD_SOUND_REDUCTION, listener::onLoudSoundReduction);
             readHandle(AirPodsAttData.HANDLE_HEARING_AID, listener::onHearingAid);
         });
     }
 
-    void writeTransparency(byte[] data) {
-        writeAsync(AirPodsAttData.HANDLE_TRANSPARENCY, data);
+    boolean writeTransparency(byte[] data) {
+        return writeAsync(AirPodsAttData.HANDLE_TRANSPARENCY, data);
     }
 
-    void writeHearingAid(byte[] data) {
-        writeAsync(AirPodsAttData.HANDLE_HEARING_AID, data);
+    boolean writeHearingAid(byte[] data) {
+        return writeAsync(AirPodsAttData.HANDLE_HEARING_AID, data);
     }
 
-    void writeLoudSoundReduction(boolean enabled) {
-        writeAsync(AirPodsAttData.HANDLE_LOUD_SOUND_REDUCTION, new byte[]{(byte) (enabled ? 1 : 0)});
+    boolean writeLoudSoundReduction(boolean enabled) {
+        return writeAsync(AirPodsAttData.HANDLE_LOUD_SOUND_REDUCTION, new byte[]{(byte) (enabled ? 1 : 0)});
     }
 
-    private void writeAsync(int handle, byte[] data) {
-        if (!running.get()) return;
-        requests.execute(() -> writeHandle(handle, data));
+    /** False means nothing was queued: the bearer is down, so the caller must not assume success. */
+    private boolean writeAsync(int handle, byte[] data) {
+        if (!connected) return false;
+        return submit(() -> writeHandle(handle, data));
+    }
+
+    private boolean submit(Runnable task) {
+        if (!running.get()) return false;
+        try {
+            requests.execute(task);
+            return true;
+        } catch (RejectedExecutionException stopped) {
+            return false;
+        }
     }
 
     private void loop() {
@@ -220,7 +235,7 @@ final class AttSession {
 
     private void readHandle(int handle, ValueConsumer consumer) {
         byte[] response = request(0x0A, new byte[]{0x0A, (byte) handle, 0}, 0x0B);
-        if (response != null && response.length > 1) {
+        if (response != null && response.length > 1 && running.get()) {
             consumer.accept(Arrays.copyOfRange(response, 1, response.length));
         }
     }
@@ -231,7 +246,9 @@ final class AttSession {
         pdu[1] = (byte) handle;
         pdu[2] = 0;
         System.arraycopy(value, 0, pdu, 3, value.length);
-        request(0x12, pdu, 0x13);
+        if (request(0x12, pdu, 0x13) == null && running.get()) {
+            Logx.w("ATT write not acknowledged handle=0x" + Integer.toHexString(handle), null);
+        }
     }
 
     private byte[] request(int requestOpcode, byte[] pdu, int responseOpcode) {

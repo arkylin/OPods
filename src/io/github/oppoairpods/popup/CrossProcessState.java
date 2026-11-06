@@ -7,12 +7,20 @@ import android.os.Process;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 
 /** Small file-backed state shared by the main and :cards MyDevices processes. */
 final class CrossProcessState {
     private static final String FILE_NAME = "oppo_airpods_state.properties";
     private static final String AUTO_CONNECT = "auto_connect";
+    private static final String LID_FALLBACK = "lid_open_unverified_fallback";
+    private static final String LAST_ADVERT = "last_lid_advert";
+    private static final String IRK_PREFIX = "irk_";
+    private static final String ENC_PREFIX = "enc_";
     private static final String SETTINGS_OPEN = "settings_open";
     private static final String SETTINGS_OPEN_AT = "settings_open_at";
     private static final String BATTERY = "battery";
@@ -24,6 +32,21 @@ final class CrossProcessState {
 
     private CrossProcessState() {}
 
+    /** Proximity keys the AirPods handed out over AACP, kept per pair. */
+    static final class Keys {
+        final String address;
+        final byte[] irk;
+        final byte[] enc;
+
+        Keys(String address, byte[] irk, byte[] enc) {
+            this.address = address;
+            this.irk = irk;
+            this.enc = enc;
+        }
+    }
+
+    // Lid-open settings are read in whichever MyDevices process receives the PTC result, so
+    // they live in this shared file rather than in one process's SharedPreferences.
     static boolean autoConnect(Context context) {
         String value = read(context, AUTO_CONNECT);
         if (value != null) return "1".equals(value);
@@ -35,6 +58,65 @@ final class CrossProcessState {
         context.getSharedPreferences("oppo_airpods_enhanced", Context.MODE_PRIVATE)
                 .edit().putBoolean("auto_connect", enabled).apply();
         write(context, AUTO_CONNECT, enabled ? "1" : "0");
+    }
+
+    /** Whether lid-open adverts may trigger the popup while no pair has handed out its IRK yet. */
+    static boolean lidOpenFallback(Context context) {
+        String value = read(context, LID_FALLBACK);
+        return value == null || "1".equals(value);
+    }
+
+    static void setLidOpenFallback(Context context, boolean enabled) {
+        write(context, LID_FALLBACK, enabled ? "1" : "0");
+    }
+
+    static void setLastAdvert(Context context, String summary) {
+        write(context, LAST_ADVERT, System.currentTimeMillis() + "|" + summary);
+    }
+
+    static String lastAdvert(Context context) {
+        return read(context, LAST_ADVERT);
+    }
+
+    static void setProximityKeys(Context context, String address, byte[] irk, byte[] enc) {
+        if (address == null || address.isEmpty()) return;
+        String key = address.toUpperCase(Locale.ROOT);
+        synchronized (LOCK) {
+            Properties values = load(context);
+            if (irk != null) values.setProperty(IRK_PREFIX + key, Base64.getEncoder().encodeToString(irk));
+            if (enc != null) values.setProperty(ENC_PREFIX + key, Base64.getEncoder().encodeToString(enc));
+            save(context, values);
+        }
+    }
+
+    static Keys proximityKeys(Context context, String address) {
+        if (address == null || address.isEmpty()) return null;
+        return allProximityKeys(context).get(address.toUpperCase(Locale.ROOT));
+    }
+
+    static Map<String, Keys> allProximityKeys(Context context) {
+        Map<String, Keys> result = new LinkedHashMap<>();
+        synchronized (LOCK) {
+            Properties values = load(context);
+            for (String name : values.stringPropertyNames()) {
+                if (!name.startsWith(IRK_PREFIX) && !name.startsWith(ENC_PREFIX)) continue;
+                String address = name.substring(name.indexOf('_') + 1);
+                if (result.containsKey(address)) continue;
+                result.put(address, new Keys(address,
+                        decode(values.getProperty(IRK_PREFIX + address)),
+                        decode(values.getProperty(ENC_PREFIX + address))));
+            }
+        }
+        return result;
+    }
+
+    private static byte[] decode(String value) {
+        if (value == null || value.isEmpty()) return null;
+        try {
+            return Base64.getDecoder().decode(value);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     static boolean settingsOpen(Context context) {
@@ -67,37 +149,6 @@ final class CrossProcessState {
                     + "," + battery[3] + "," + battery[4] + "," + battery[5]);
             values.setProperty(BATTERY_AT, String.valueOf(System.currentTimeMillis()));
             save(context, values);
-        }
-    }
-
-    static String batteryAddress(Context context) {
-        return read(context, BATTERY_ADDRESS);
-    }
-
-    static int[] battery(Context context) {
-        synchronized (LOCK) {
-            Properties values = load(context);
-            String value = values.getProperty(BATTERY);
-            String timestamp = values.getProperty(BATTERY_AT);
-            if (value == null || value.isEmpty() || timestamp == null) return null;
-            try {
-                if (System.currentTimeMillis() - Long.parseLong(timestamp) >= BATTERY_VISIBLE_MS) {
-                    return null;
-                }
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
-            String[] parts = value.split(",");
-            if (parts.length != 6) return null;
-            int[] parsed = new int[6];
-            try {
-                for (int index = 0; index < parsed.length; index++) {
-                    parsed[index] = Integer.parseInt(parts[index]);
-                }
-                return parsed;
-            } catch (NumberFormatException ignored) {
-                return null;
-            }
         }
     }
 
