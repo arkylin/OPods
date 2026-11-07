@@ -8,6 +8,7 @@
 - 把增强条目直接注入官方偏好页，保留 COUI 的视觉、列表弹窗和点击语义。
 - 在系统自己的蓝牙进程里修正 ColorOS 对 AirPods 的错误假设。
 - 不创建 Activity、Service、Receiver、Provider，不常驻扫描，不依赖 LibrePods。
+- 需要后台感知的场景（开盖）只借用官方已经在跑的常驻扫描，过滤尽量放进蓝牙芯片。
 
 ## 进程与作用域
 
@@ -15,8 +16,8 @@
 
 | 包名 | 作用 |
 | --- | --- |
-| `com.heytap.mydevices` | 官方弹窗、开盖 PTC 回调、设置页、AACP 控制通道和状态缓存 |
-| `com.heytap.accessory` | 官方持久扫描器交出 Apple 开盖结果时，让官方 FusionWakeup 唤醒 MyDevices |
+| `com.heytap.mydevices` | 官方弹窗、开盖唤醒接收（`:cards` 的官方保活服务）、设置页、AACP 控制通道和状态缓存 |
+| `com.heytap.accessory` | 给官方常驻扫描追加 AirPods 开盖硬件过滤，一次开盖唤醒一次 MyDevices `:cards` |
 | `com.android.bluetooth` | 过滤 ColorOS 写入 AirPods 的 `DISABLE_OFF` 帧 |
 
 `META-INF/xposed/java_init.list` 唯一入口是
@@ -33,6 +34,9 @@ SystemUI 和 Settings 均不在作用域内。早期“蓝牙设置 > 耳机功�
 
 ```text
 com.android.bluetooth  ───> AapOffFilter
+
+com.heytap.accessory   ───> FusionProvider.d()（追加开盖过滤）
+                            └─ 持久扫描结果出口 output.m.a → LidGate → 绑定 :cards 保活服务
 
 com.heytap.mydevices  ───> MyDevices hook set
                             ├─ DeviceApplication.onCreate
@@ -65,22 +69,31 @@ ColorOS 私有 DEX，因此以下类名、方法名和混淆名属于版本相�
 `AirpodsDiscoveryActivity`，同时传入 `bluetooth_device` 和 `device_model`。设置页打开时
 不会重复弹窗；3.5 秒内也不会重复启动。
 
-开盖弹窗走官方 PTC，模块只补全官方流程：
+开盖弹窗借用 OPPO 自家耳机的同一个官方常驻扫描，模块不另开扫描（3.4.50 重做）：
 
-1. MyDevices 的官方 `registerPtc` 把 Apple `0x004C` 开盖过滤注册给 Accessory 的官方持久扫描器。
-   ROM 写死了 `07 19 07` / `07 0F 00` 三字节前缀，模块把 `setManufacturerData` 的两个重载都放宽到
-   `07 19` / `07 0F`，让 AirPods 5 等新机型能匹配。
-2. 扫描结果经官方 PTC listener，或经 Accessory 侧的 FusionWakeup → CoreService 回到 MyDevices；
-   Accessory 侧模块会把官方 AirPods listener 置空以走唤醒路径（官方调用点都判空）。
-3. `AppleAdvertisement` 解析 `0x07` 邻近消息（字段位置与 LibrePods 一致）：盒盖、型号、
-   10% 档位电量、充电、佩戴、连接状态；最后 16 字节是加密部分。
-4. `AirPodsController.onCaseAdvertisement` 做身份校验：系统已解析的身份地址直接比对；否则用
-   AirPods 经 AACP `0x30/0x31` 下发的 IRK 校验 RPA（`ProximityCrypto.verifyRpa`，即蓝牙规范 ah 函数）。
-   有 ENC 密钥时解密出精确电量，记录到“最近开盖广播”。
-5. 只有通过校验的那副（或用户允许时、还没拿到密钥的那副）才启动官方 `AirpodsDiscoveryActivity`。
+1. 官方扫描：`com.heytap.accessory` 的 pantaconnect `ScanAutomaticFilter` 在亮屏/解锁时启动
+   “Auto”扫描（低延迟 1 秒 → 均衡约 5 分钟 → 低功耗），息屏即停；亮屏期间 `ScanFusionLePersistentFilter`
+   把 `FusionProvider.d()` 返回的持久过滤并进去，扫描结果分类器 `c.b()` 也逐条用 `d()` 比对。
+2. 模块在 `d()` 末尾追加一条 Apple `0x004C` 过滤：27 字节图样，掩码只看 `07 19` 和第 8 字节的开盖位
+   （`0x08` 为 0 表示开盖）。图样覆盖整条消息，硬件卸载过滤才能命中。耳机戴着、盒盖合上时发的广播在芯片里就被丢掉。
+   同时去掉 3.4.48/3.4.49 经官方 `registerPtc` 注册进来的 `07 19` / `07 0F` 两字节宽过滤。ROM 自己的
+   `07 19 07` / `07 0F 00`（配对模式）原样保留，新 AirPods 的配对弹窗不受影响。
+3. 结果出口 `output.m.a` 把 AirPods 状态消息交给 `LidGate`：同一次开盖只放行第一条（8 秒没有广播才算下一次开盖，
+   大于低功耗档 5.12 秒扫描间隔）、RSSI ≥ −70（与官方 AirPods 注册一致）、双耳佩戴不算、多副同时开盖每 2 秒最多一次。
+   这些消息不再交给 ROM：ROM 对已配对 AirPods 的开盖本来就不处理，交给它只会触发官方 FusionWakeup，
+   而 FusionWakeup 有频控（30 秒内间隔按 2 秒递增到 300 秒），会把真正那次开盖拦掉。
+4. 放行的那条经官方保活服务 `com.oplus.mydevices.keepalive.oaf.OafPersistentService`（`:cards`，
+   action `com.heytap.accessory.PERSISTENT_BIND`，权限 `com.oplus.permission.safe.PERSISTENT`，accessory 本来就用它保活）
+   绑定送到 MyDevices `:cards`，`onBind` 被调用后立即解绑；绑定失败才退回 `CoreService`。`:cards` 每次按需 fork，
+   LSPosed 能稳定注入，不依赖注入不上的主进程。
+5. `:cards` 里 `AppleAdvertisement` 解析 `0x07` 邻近消息（字段位置与 LibrePods 一致），
+   `AirPodsController.onCaseAdvertisement` 做身份校验：系统已解析的身份地址直接比对；否则用 AirPods 经 AACP
+   `0x30/0x31` 下发的 IRK 校验 RPA（`ProximityCrypto.verifyRpa`，即蓝牙规范 ah 函数）。有 ENC 密钥时解密出精确电量。
+6. 通过校验的那副（或用户允许时、还没拿到密钥的那副）启动官方 `AirpodsDiscoveryActivity`；已验证时先把广播电量
+   写进官方弹窗，耳机回连后 AACP 接管。弹窗已显示同一副耳机时，ACL 连上不再重复拉起。
 
-限制：ColorOS 官方扫描器只在亮屏（`isInteractive`）时并入 AirPods 过滤，息屏开盖不会弹窗；
-官方主进程没被 LSPosed 注入时，开盖唤醒依赖 `:cards` 进程还在运行。
+限制：和 OPPO 自家耳机一样只在亮屏时扫描，息屏开盖不会弹窗；需要勾选 `com.heytap.accessory` 作用域，
+装新版后停止一次 accessory（官方常驻进程）才会带上新注入。
 
 模块需要知道“当前页面显示的是哪副耳机”时，按以下顺序取设备：
 

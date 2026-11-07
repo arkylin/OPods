@@ -5,9 +5,9 @@
 
 ## 当前版本
 
-- 当前版本：`v3.4.49`（`versionCode 83`，**待真机验证**）
-- 当前 Release：[v3.4.49-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.49-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
-- APK：`OPods-v3.4.49-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.49-arm64-v8a.sha256`
+- 当前版本：`v3.4.50`（`versionCode 84`，**待真机验证**）
+- 当前 Release：[v3.4.50-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.50-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
+- APK：`OPods-v3.4.50-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.50-arm64-v8a.sha256`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 切换到 100 年正式 Release 证书；3.4.29–3.4.31 同步官方弹窗、耳机页与 DeviceInfo；3.4.45 通过官方 CoreService IPC 刷新控制中心磁贴电量；3.4.46 修复磁贴充电状态被空快照覆盖；3.4.47 首连有限热身重试以拿到第一包电量。
@@ -24,6 +24,11 @@
   - 自适应降噪强度滑杆改为越大降噪越强（直接对应 AACP `0x2E` 数值），官方页和面板三处一致；
   - 切换降噪不再闪：官方降噪栏只移动选中项，不再让 ROM 每次重建整条栏；
   - 刚连上时切换不再被旧状态顶回去：选中的模式会保持显示，耳机 3 秒内报回的旧模式被忽略，确认或超时后再以耳机为准。
+- 3.4.50 重做开盖弹窗，做法和 OPPO 自家耳机一致、不额外耗电：
+  - 复用 accessory 里 OPPO 自家耳机用的常驻扫描（只在亮屏时运行），只追加一条覆盖整条 27 字节消息的硬件过滤：只放行 `07 19` 且“开盖”位为开的 AirPods 广播；
+  - 一次开盖只唤醒一次 MyDevices，经官方 accessory 保活绑定（`OafPersistentService`）直接送到能稳定注入的 `:cards`，不再依赖注入不上的主进程，也不再走会被官方频控拦掉的 FusionWakeup；
+  - 去掉 3.4.48 起把 ROM 过滤放宽成 `07 19` 两字节的 Hook：它让附近所有 AirPods（包括戴在耳朵上时）的每条广播都去唤醒 MyDevices；
+  - IRK 校验通过后先把广播里的电量（有 ENC 密钥时为精确值）写进官方弹窗，连上后由 AACP 接管；弹窗已显示同一副耳机时，连上不再重复拉起。
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE、心率和头部手势仍需对应真机验收。
 
@@ -87,20 +92,19 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 | 进程 | Hook 点数 | 职责 |
 | --- | ---: | --- |
-| `com.heytap.mydevices` | 32 | 官方 AirPods 弹窗、开盖 PTC、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
-| `com.heytap.accessory` | 1 | 官方持久扫描器交出 Apple 邻近结果时，让官方 FusionWakeup 唤醒 MyDevices |
+| `com.heytap.mydevices` | 32 | 官方 AirPods 弹窗、开盖唤醒接收、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
+| `com.heytap.accessory` | 2 | 给官方常驻扫描追加 AirPods 开盖硬件过滤；一次开盖唤醒一次 MyDevices `:cards` |
 | `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
-> 计数口径是源码中的 `hook(...)` 调用点。`ScanFilter$Builder.setManufacturerData` 一个调用点会
-> Hook 两个重载；`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，因此运行时实际 Hook 的
-> 方法数可能多于调用点数。
+> 计数口径是源码中的 `hook(...)` 调用点。`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，
+> 因此运行时实际 Hook 的方法数可能多于调用点数。
 
 ### `com.heytap.mydevices`：32 个 Hook 点
 
 | # | 目标类 / 方法 | 作用 |
 | ---: | --- | --- |
 | 1 | `DeviceApplication.onCreate()` | 记录官方进程的 `Application` 上下文，供后续 UI 与控制器使用。 |
-| 2 | `ScanFilter$Builder.setManufacturerData(int, byte[])` 与 `(int, byte[], byte[])` | 厂商 ID 为 Apple `0x004C` 且数据为 ROM 写死的 `07 19 xx` / `07 0F xx` 时，放宽为 `07 19` / `07 0F` 两字节，让 AirPods 5 等新机型的开盖广播能进官方过滤；身份由后面的 IRK 校验保证。 |
+| 2 | `com.oplus.mydevices.keepalive.oaf.OafPersistentService.onBind(Intent)` | 官方 accessory 保活服务（`:cards`）。只读取 accessory 侧开盖唤醒带来的广播数据，交给开盖处理（IRK 校验 → 官方弹窗）；官方 binder 原样返回。 |
 | 3 | `AirpodsScanHelper.registerPtc()` | 调用官方实现后读取 `mIsPtcRegistered`，只用于确认官方 PTC 注册结果。 |
 | 4 | `aa.b2$a.r()`（回退 `aa.AbstractC0958b2$a`） | 强制返回 `true`，开启官方 AirPods 特性支持。 |
 | 5 | `aa.b2$a.J(int)`（按签名回退） | 把能力位与 `0x200` 合并，启用官方 UI 的 Off 模式能力。 |
@@ -109,7 +113,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 8 | `AirpodsManager$c.onReceive(Context, Intent)` | 官方广播处理后接收 `ACL_CONNECTED` / `ACL_DISCONNECTED`，同步给 `AirPodsController` 并请求官方弹窗。 |
 | 9 | `AirpodsScanHelper$registerPtc$2$a.onServiceFound(...)` | 官方 PTC 回调：解析 Apple 邻近消息，开盖且通过身份校验时请求官方弹窗。 |
 | 10 | `FusionServiceImpl.handleEvents(...)` | 对 `onServiceFound` 事件解析 `ServiceNodeParams` 并转换为 `ServiceNode`，走与 PTC 回调相同的处理路径。 |
-| 11 | `CoreService.onStartCommand(Intent, int, int)` | 官方 FusionWakeup 唤醒 CoreService 时解析 `serviceNode`，走同一开盖处理。 |
+| 11 | `CoreService.onStartCommand(Intent, int, int)` | 官方 FusionWakeup 唤醒 CoreService 时解析 `serviceNode`；`:cards` 绑定失败时 accessory 的开盖唤醒也落到这里，走同一开盖处理。 |
 | 12 | `InnerIpcManager` 构造器 | 捕获 `:cards` 进程的官方 IPC 管理器，供 AACP 电量快照走官方 CoreService 通道。 |
 | 13 | `AirpodsManager.process(String, String, Bundle, int)`（按签名回退） | 只识别自定义 `OPODS_AACP_BATTERY_V1`，在核心进程调用官方 `AirpodsScanPolicy.onBatteryLevelChanged`；其他请求原样放行。 |
 | 14 | `AirpodsSettingPreferencesFragment.onCreatePreferences(Bundle, String)` | 官方设置页构建完成后注入自适应滑杆和“AirPods 增强”入口。 |
@@ -132,11 +136,12 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 31 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
 | 32 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
 
-### `com.heytap.accessory`：1 个 Hook 点
+### `com.heytap.accessory`：2 个 Hook 点
 
 | 目标类 / 方法 | 作用 |
 | --- | --- |
-| `com.oplus.pantaconnect.discovery.core.discover.result.output.m.a(...)` | 官方持久扫描器交出 Apple `ManufacturerId=76`、首字节 `07` 的邻近结果时，把官方 AirPods discovery 记录里的 listener 置空，让官方代码改走 FusionWakeup 唤醒 MyDevices CoreService（官方各调用点都对 listener 判空）。这会改动官方状态，不是纯被动观察；不建立第二套 BLE 扫描。 |
+| `com.oplus.pantaconnect.discovery.fusionprovider.FusionProvider.d()` | 官方持久过滤器列表：亮屏时被并进官方扫描，并逐条和每个结果比对。追加一条 Apple `0x004C` 过滤（27 字节，掩码 `07 19` + 开盖位），并去掉 3.4.48/3.4.49 注册进来的 `07 19` / `07 0F` 两字节宽过滤。不新建扫描，扫描的启停、档位、亮屏门控全由官方决定。 |
+| `com.oplus.pantaconnect.discovery.core.discover.result.output.m.a(...)` | 官方持久扫描结果出口。AirPods 状态消息（`07 19`、非配对模式）由 `LidGate` 判定：同一次开盖只放行第一条（8 秒无广播才算下一次开盖、RSSI ≥ −70、双耳佩戴不算、多副同时开盖每 2 秒最多一次），经官方保活服务绑定唤醒 MyDevices `:cards` 后立即解绑；这些消息不再交给 ROM（它对已配对 AirPods 的开盖本来就不处理），避免每条都触发官方 FusionWakeup。配对模式消息（`07 19 07` / `07 0F 00`）照旧交给 ROM 的新设备弹窗。 |
 
 ### `com.android.bluetooth`：1 个 Hook 点
 
@@ -146,18 +151,22 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 ### 开盖弹窗怎么工作
 
-1. MyDevices 向官方 Accessory 持久扫描器注册 Apple 开盖过滤（官方 `registerPtc`，模块只放宽 ROM 写死的前缀）。
-2. 官方扫描结果经官方 PTC listener，或经 FusionWakeup → CoreService 回到 MyDevices。
-3. 模块解析 `0x07` 邻近消息：盒盖状态、型号、10% 档位电量、佩戴和连接状态。
-4. 身份校验：系统已解析成身份地址时直接比对；否则用 AirPods 通过 AACP `0x31` 下发的 IRK 校验广播里的可解析私有地址（RPA）。有 ENC 密钥时解密出精确电量。
-5. 只有自己的耳机才会启动官方 `AirpodsDiscoveryActivity`；还没拿到密钥的耳机，按“未拿到密钥时也响应”开关决定是否按未验证方式弹窗。
+和 OPPO 自家耳机走同一个官方常驻扫描（`com.heytap.accessory` 的 pantaconnect 持久扫描）：亮屏/解锁后先低延迟 1 秒，再均衡档约 5 分钟，之后低功耗档，息屏即停。模块不另开扫描。
 
-限制：ColorOS 官方扫描器只在亮屏时并入 AirPods 过滤，息屏开盖不会弹窗；官方主进程没被 LSPosed 注入时，开盖唤醒依赖 `:cards` 进程还在运行。
+1. accessory：`FusionProvider.d()` 追加一条硬件过滤，蓝牙芯片只把“开盖”状态的 AirPods 广播交给系统，戴在耳朵上、盒盖合上时发的广播在芯片里就被丢掉。
+2. accessory：官方结果出口把命中的广播交给 `LidGate`，同一次开盖只放行一次，经官方保活服务 `OafPersistentService` 的绑定把广播数据送到 MyDevices `:cards`，随即解绑。
+3. `:cards`：解析 `0x07` 邻近消息（盒盖状态、型号、电量、佩戴和连接状态）。
+4. 身份校验：系统已解析成身份地址时直接比对；否则用 AirPods 通过 AACP `0x31` 下发的 IRK 校验广播里的可解析私有地址（RPA）。有 ENC 密钥时解密出精确电量，先显示在官方弹窗上。
+5. 只有自己的耳机才会启动官方 `AirpodsDiscoveryActivity`；还没拿到密钥的耳机，按“未拿到密钥时也响应”开关决定是否按未验证方式弹窗。之后耳机回连、AACP 接管电量。
+
+限制：和 OPPO 自家耳机一样只在亮屏时扫描，息屏开盖不会弹窗；必须勾选 `com.heytap.accessory` 作用域，装新版后停止一次 accessory 才会带上新注入。
+
+耗电：没有新增扫描、进程、Service、Receiver、闹钟或唤醒锁；扫描本来就在跑，追加的过滤在芯片里执行，只有附近有人开盖时 accessory 才收到结果，每次开盖最多唤醒一次 `:cards`。
 
 ### 明确不 Hook
 
 - `AirpodsDiscoveryActivity` 只 Hook `onResume()` / `onPause()` 来启动和节流官方 AACP 电量通道；不替换 Activity，也不改变官方弹窗流程。
-- `com.heytap.accessory` 只保留上述 1 个 Hook 点；Off 帧过滤和 AACP/ATT 仍只在 MyDevices/Bluetooth 中完成。
+- `com.heytap.accessory` 只保留上述 2 个 Hook 点（持久过滤列表与结果出口）；不碰官方扫描的启停、档位和亮屏门控，Off 帧过滤和 AACP/ATT 仍只在 MyDevices/Bluetooth 中完成。
 - `com.oplus.wirelesssettings`：旧版“蓝牙设置 → 耳机功能”实验路径已删除，当前只使用 MyDevices 官方页。
 - `com.oplus.melody`、Launcher、SystemUI、Settings 和第三方 App：不 Hook。
 - 模块不创建自建 BLE 扫描、主动重连 watchdog、后台监听 Service 或独立连接路径。来电识别只在“点头接听 / 摇头拒接”打开且 AACP 通道在线时，于官方进程内监听音频模式变化。
@@ -234,10 +243,11 @@ LSPosed 的启用、作用域勾选、重启/停止进程由设备使用者完�
 ```bash
 S=src/io/github/oppoairpods/popup
 javac -encoding UTF-8 -d out $S/AacpProtocol.java $S/AirPodsAttData.java $S/HeadGestureTracker.java \
-    $S/AppleAdvertisement.java $S/ProximityCrypto.java $S/ListeningModeTracker.java     test/io/github/oppoairpods/popup/*.java
+    $S/AppleAdvertisement.java $S/ProximityCrypto.java $S/ListeningModeTracker.java $S/LidGate.java \n    test/io/github/oppoairpods/popup/*.java
 java -cp out io.github.oppoairpods.popup.AacpProtocolTest
 java -cp out io.github.oppoairpods.popup.ProximityTest
 java -cp out io.github.oppoairpods.popup.ListeningModeTrackerTest
+java -cp out io.github.oppoairpods.popup.LidGateTest
 ```
 
 GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再读取 AndroidManifest.xml 的版本号并构建
@@ -260,10 +270,10 @@ GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再�
 
 也可以在面板“设备 → 故障排查”里分享最近日志，或抓 `OPPOAirPods` tag 的 logcat。升级 OPPO 组件后重点看：
 
-- `MyDevices hooks installed`、`official Accessory PTC output hook installed`
+- `MyDevices hooks installed`、`official Accessory PTC output hook installed`、`official Accessory persistent filter hook installed`
 - `Hook failed` / `hook failed`
-- `AirPods scan filter hook installed (2 overloads)`、`AirPods scan filter broadened`
-- `PTC service data len=...`、`Case-open advertisement for ...`、`case-open ignored: ...`
+- accessory：`official persistent scan: AirPods lid-open filter added`（亮屏后官方扫描并入过滤时）、`official scan heard an AirPods lid opening rssi=... (#n)`、`dropped broad legacy AirPods filter`
+- `:cards`：`official keep-alive lid wake hook installed`、`lid wake from Accessory rssi=...`、`Case-open advertisement for ...`、`case-open ignored: ...`、`lid advert battery -> official popup ...`
 - `proximity keys stored: IRK=true ENC=true`
 - `official feature support forced for AirPods`
 - `official popup battery hook installed` / `official detail battery hook installed`

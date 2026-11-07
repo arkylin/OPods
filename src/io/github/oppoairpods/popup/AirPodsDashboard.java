@@ -260,7 +260,7 @@ final class AirPodsDashboard implements AirPodsController.Listener {
                 controller.earPlayback(), true,
                 (button, checked) -> controller.setEarPlayback(checked)));
         specs.add(new DashboardUi.ToggleSpec("开盖自动连接", "开盖时弹出官方弹窗，由官方流程连接",
-                ProtocolInfo.localEvent("auto_connect", "官方 PTC 开盖广播 + 官方弹窗"),
+                ProtocolInfo.localEvent("auto_connect", "官方常驻扫描开盖广播 + 官方弹窗"),
                 controller.autoConnect(), true,
                 (button, checked) -> controller.setAutoConnect(checked)));
         specs.add(new DashboardUi.ToggleSpec("低电量提醒", "电量低于 20% 时通知",
@@ -654,7 +654,7 @@ final class AirPodsDashboard implements AirPodsController.Listener {
         ui.cardTitle(lid, "开盖自动连接", "打开充电盒时弹出 OPPO 官方连接弹窗，由官方流程完成连接");
         List<DashboardUi.ToggleSpec> lidSpecs = new ArrayList<>();
         lidSpecs.add(new DashboardUi.ToggleSpec("开盖自动连接", "收到自己 AirPods 的开盖广播时弹窗",
-                ProtocolInfo.localEvent("auto_connect", "官方 PTC 开盖广播 + 官方弹窗"),
+                ProtocolInfo.localEvent("auto_connect", "官方常驻扫描开盖广播 + 官方弹窗"),
                 controller.autoConnect(), true,
                 (button, checked) -> controller.setAutoConnect(checked)));
         lidSpecs.add(new DashboardUi.ToggleSpec("未拿到密钥时也响应", "还没拿到识别密钥的耳机按未验证方式弹窗",
@@ -664,11 +664,13 @@ final class AirPodsDashboard implements AirPodsController.Listener {
         ui.toggleGrid(lid, lidSpecs);
         ui.infoRow(lid, "识别密钥", controller.proximityKeyStatus());
         ui.featureRow(lid, "最近开盖广播", "记录", controller.lastAdvertSummary());
-        ui.notice(lid, "受限", "ColorOS 官方扫描器只在亮屏时匹配 AirPods 开盖广播，息屏开盖不会弹窗；"
-                + "官方主进程没被 LSPosed 注入时，开盖唤醒依赖 :cards 进程还在运行。");
+        ui.notice(lid, "原理", "复用 accessory 里 OPPO 自家耳机用的那个常驻扫描：只追加一条蓝牙芯片硬件过滤（只放行"
+                + "“开盖”状态的 AirPods 广播），一次开盖只唤醒一次 MyDevices，不新增扫描、进程、闹钟或唤醒锁。");
+        ui.notice(lid, "受限", "和 OPPO 自家耳机一样，官方扫描只在亮屏时运行，息屏开盖不会弹窗；"
+                + "需要在 LSPosed 勾选 com.heytap.accessory 作用域，装新版后停止一次 accessory 才会生效。");
         ui.notice(lid, "说明", "识别密钥（IRK）在 AACP 连接后自动向耳机请求。拿到之前无法区分附近别人的同型号 AirPods，"
                 + "可能被别人开盖触发弹窗；不想这样可以关闭“未拿到密钥时也响应”。");
-        ui.detail(lid, "Apple 0x4C 07 19 开盖广播（官方 PTC）· RPA 用 IRK 校验 · 电量用 ENC 解密");
+        ui.detail(lid, "Apple 0x4C 07 19 开盖位（硬件掩码）· 官方保活绑定唤醒 :cards · RPA 用 IRK 校验 · 电量用 ENC 解密");
 
         LinearLayout conn = ui.section(content, "自动连接");
         ui.cardTitle(conn, "设备侧配置", "连接与弹窗由 OPPO 官方流程负责；这里只写 AirPods 自己的 0x20 配置");
@@ -1325,7 +1327,7 @@ final class AirPodsDashboard implements AirPodsController.Listener {
                 {"头部手势（点头接听/摇头拒接）", "已支持", "操控页；包含姿态测试与备用追踪包"},
                 {"对话感知", "已支持", "常用页开关 + 音频页手机端降音量/暂停"},
                 {"自动连接到 AirPods", "已支持", "连接页 0x20 设备侧配置 + 开盖自动连接"},
-                {"开盖弹窗", "受限", "连接页；只在亮屏时官方扫描器能匹配，息屏开盖不弹"},
+                {"开盖弹窗", "受限", "连接页；和 OPPO 自家耳机一样只在亮屏时由官方常驻扫描匹配，息屏开盖不弹"},
                 {"助听器 / 听力测试结果", "已支持", "健康页；需要 Pro 机型"},
                 {"通透模式自定义", "已支持", "健康页；需要 Pro 机型"},
                 {"多设备连接（Multipoint）", "不可用", "需要修改蓝牙栈 VendorID，本模块不改蓝牙栈"},

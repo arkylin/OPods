@@ -974,11 +974,18 @@ final class AirPodsController implements AacpSession.Listener {
         final BluetoothDevice device;
         final CrossProcessState.Keys keys;
         final String label;
+        /** The advert's address resolved to this pair (stack or IRK), not the no-key fallback. */
+        final boolean verified;
 
         LidMatch(BluetoothDevice device, CrossProcessState.Keys keys, String label) {
+            this(device, keys, label, false);
+        }
+
+        LidMatch(BluetoothDevice device, CrossProcessState.Keys keys, String label, boolean verified) {
             this.device = device;
             this.keys = keys;
             this.label = label;
+            this.verified = verified;
         }
     }
 
@@ -1009,7 +1016,43 @@ final class AirPodsController implements AacpSession.Listener {
         lastCaseAt = now;
         if (!"AirPods".equals(advert.model)) modelName = advert.model;
         Logx.i("Case-open advertisement for " + shown.model + " (" + match.label + ")");
+        if (match.verified) seedAdvertBattery(match.device, shown);
         scheduleOfficialPopup(match.device, 0);
+    }
+
+    /**
+     * Like the ROM's own earbuds, the popup shows the battery the moment the lid opens: the
+     * verified advert's levels (exact once the ENC key is known) stand in until AACP reports.
+     */
+    private void seedAdvertBattery(BluetoothDevice device, AppleAdvertisement.LidInfo info) {
+        if (!aacpOwner || device == null || info == null) return;
+        // Same pair the popup will attach, so its onResume keeps these values.
+        attachDevice(device);
+        synchronized (this) {
+            AacpSession current = session;
+            if (hasBatterySnapshot() && current != null && current.ready()) return;
+            boolean any = false;
+            if (info.leftBattery >= 0) {
+                left = info.leftBattery;
+                leftStatus = info.leftCharging ? 1 : 2;
+                any = true;
+            }
+            if (info.rightBattery >= 0) {
+                right = info.rightBattery;
+                rightStatus = info.rightCharging ? 1 : 2;
+                any = true;
+            }
+            if (info.caseBattery >= 0) {
+                caseLevel = info.caseBattery;
+                caseStatus = info.caseCharging ? 1 : 2;
+                any = true;
+            }
+            if (!any) return;
+            recomputeChargingMask();
+        }
+        Logx.i("lid advert battery -> official popup " + info.batteryText());
+        OfficialBatteryBridge.schedule(this);
+        notifyChanged();
     }
 
     private LidMatch matchLidAdvert(String bleAddress) {
@@ -1021,12 +1064,12 @@ final class AirPodsController implements AacpSession.Listener {
             CrossProcessState.Keys keys = stored.get(device.getAddress().toUpperCase(Locale.ROOT));
             // The stack reports the identity address when it can resolve the RPA itself.
             if (bleAddress != null && device.getAddress().equalsIgnoreCase(bleAddress)) {
-                return new LidMatch(device, keys, "已验证（系统解析地址）");
+                return new LidMatch(device, keys, "已验证（系统解析地址）", true);
             }
             if (keys == null || keys.irk == null) {
                 withoutIrk.add(device);
             } else if (bleAddress != null && ProximityCrypto.verifyRpa(bleAddress, keys.irk)) {
-                return new LidMatch(device, keys, "已验证（IRK）");
+                return new LidMatch(device, keys, "已验证（IRK）", true);
             }
         }
         if (withoutIrk.isEmpty()) return new LidMatch(null, null, "不是本机的 AirPods（IRK 不匹配）");
@@ -1075,6 +1118,8 @@ final class AirPodsController implements AacpSession.Listener {
 
     void launchOfficialPopup(BluetoothDevice device) {
         if (settingsPageOpen || CrossProcessState.settingsOpen(context)) return;
+        // Already showing this pair (opened on the lid, then the link came up): keep it.
+        if (popupVisible && device != null && device.getAddress().equalsIgnoreCase(address)) return;
         long now = System.currentTimeMillis();
         if (now - lastPopupAt < 3500L) return;
         lastPopupAt = now;

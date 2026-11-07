@@ -2,8 +2,6 @@ package io.github.oppoairpods.popup;
 
 import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
-import android.bluetooth.le.ScanFilter;
-import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
@@ -24,7 +22,6 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.Map;
 import java.util.function.Predicate;
 
 import io.github.libxposed.api.XposedModule;
@@ -48,6 +45,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     private static volatile Context appContext;
     private static final java.util.concurrent.atomic.AtomicInteger PTC_LOGS =
             new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicBoolean ADJUST_ERROR_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -79,13 +78,13 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         HiddenApi.exemptBluetooth();
         appContext = currentApplication();
         hookApplication(loader);
-        hookAirPodsScanFilter(loader);
         hookPtcRegistration(loader);
         hookAirPodsSupport(loader);
         hookOfficialPopup(loader);
         hookScanCallback(loader);
         hookFusionEvents(loader);
         hookCoreService(loader);
+        hookLidWake(loader);
         hookInnerIpc(loader);
         hookAirpodsIpc(loader);
         hookDiscoveryActivity(loader);
@@ -124,46 +123,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         }
     }
 
-    /**
-     * The ROM's PTC filter is pinned to AirPods 4 era proximity prefixes ({7,25,7} / {7,15,0}).
-     * Keep the manufacturer id and the message type/length, but let newer AirPods (for example
-     * AirPods 5) match on the first two bytes. Identity is checked later with the IRK.
-     */
-    private void hookAirPodsScanFilter(ClassLoader loader) {
-        try {
-            Class<?> builder = Class.forName("android.bluetooth.le.ScanFilter$Builder", false, loader);
-            int hooked = 0;
-            for (Method method : builder.getDeclaredMethods()) {
-                if (!"setManufacturerData".equals(method.getName())) continue;
-                Class<?>[] types = method.getParameterTypes();
-                final boolean withMask = types.length == 3 && types[2] == byte[].class;
-                if ((types.length != 2 && !withMask) || types[0] != int.class || types[1] != byte[].class) {
-                    continue;
-                }
-                hook(method).intercept(chain -> {
-                    int manufacturer = (int) chain.getArg(0);
-                    Object raw = chain.getArg(1);
-                    if (manufacturer == 76 && raw instanceof byte[]) {
-                        byte[] data = (byte[]) raw;
-                        // Only the ROM's three-byte AirPods filters; a broadened one is left alone.
-                        if (data.length > 2 && data[0] == 7 && (data[1] == 25 || data[1] == 15)) {
-                            byte[] broadened = new byte[]{7, data[1]};
-                            Logx.i("AirPods scan filter broadened for subtype " + (data[1] & 0xFF));
-                            return withMask
-                                    ? chain.proceed(new Object[]{manufacturer, broadened,
-                                            new byte[]{(byte) 0xFF, (byte) 0xFF}})
-                                    : chain.proceed(new Object[]{manufacturer, broadened});
-                        }
-                    }
-                    return chain.proceed();
-                });
-                hooked++;
-            }
-            Logx.i("AirPods scan filter hook installed (" + hooked + " overloads)");
-        } catch (Throwable error) {
-            Logx.w("AirPods scan filter hook failed", error);
-        }
-    }
+    // The ROM's own AirPods filters ({7,25,7} / {7,15,0}) only match pairing-mode messages and
+    // stay as they are, so its new-device popup keeps working. Lid opening of a paired pair is
+    // matched by LidRelay's filter inside the Accessory scan instead of widening these: a
+    // two-byte filter passed every AirPods message nearby and woke MyDevices for each of them.
 
     private void hookPtcRegistration(ClassLoader loader) {
         try {
@@ -346,11 +309,40 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     }
 
     /**
-     * Accessory: when the official persistent scanner hands an Apple proximity result to
-     * FusionProvider, clear the AirPods discovery listener so the official FusionWakeup path
-     * starts MyDevices CoreService with the service node. Official callers all null-check it.
+     * Accessory: the ROM's always-resident persistent BLE scan (the one OPPO's own earbuds use,
+     * screen-on only) gets LidRelay's lid-open filter, and its FusionProvider output hands AirPods
+     * status messages to LidRelay, which wakes MyDevices :cards once per lid opening.
      */
     private void installAccessoryPtc(ClassLoader loader) {
+        Context context = currentApplication();
+        if (context != null) Logx.setContext(context);
+        try {
+            Class<?> provider = Class.forName(
+                    "com.oplus.pantaconnect.discovery.fusionprovider.FusionProvider", false, loader);
+            // d(): the persistent filters merged into the screen-on scan and matched per result.
+            // No signature fallback: a renamed d() must fail here rather than get a filter added
+            // to some other list.
+            Method filters = provider.getDeclaredMethod("d");
+            if (!java.util.List.class.isAssignableFrom(filters.getReturnType())) {
+                throw new NoSuchMethodException("FusionProvider.d() no longer returns a List");
+            }
+            hook(filters).intercept(chain -> {
+                Object result = chain.proceed();
+                if (result instanceof java.util.List) {
+                    try {
+                        LidRelay.adjustPersistentFilters((java.util.List<?>) result);
+                    } catch (Throwable error) {
+                        if (ADJUST_ERROR_LOGGED.compareAndSet(false, true)) {
+                            Logx.w("persistent filter adjust failed", error);
+                        }
+                    }
+                }
+                return result;
+            });
+            Logx.i("official Accessory persistent filter hook installed");
+        } catch (Throwable error) {
+            Logx.w("official Accessory persistent filter hook failed", error);
+        }
         try {
             Class<?> output = Class.forName(
                     "com.oplus.pantaconnect.discovery.core.discover.result.output.m", false, loader);
@@ -364,62 +356,59 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             if (handle == null) throw new NoSuchMethodException("Accessory BLE output.a");
             hook(handle).intercept(chain -> {
                 try {
-                    Object scanResult = findFieldValue(chain.getArg(0), ScanResult.class);
-                    if (scanResult instanceof ScanResult && isAppleProximity((ScanResult) scanResult)) {
-                        Logx.i("official Accessory Apple BLE result");
-                        detachAirPodsListener(chain.getThisObject());
+                    Object result = chain.getArg(0);
+                    Object scanResult = findFieldValue(result, ScanResult.class);
+                    if (scanResult instanceof ScanResult) {
+                        // The persistent filter the ROM matched this result with (n0.f).
+                        Object matched = findFieldValue(result, android.bluetooth.le.ScanFilter.class);
+                        if (LidRelay.offer(accessoryContext(), (ScanResult) scanResult, matched)) return null;
                     }
                 } catch (Throwable error) {
                     Logx.w("Accessory BLE handling failed", error);
                 }
                 return chain.proceed();
             });
-            Context context = currentApplication();
-            if (context != null) Logx.setContext(context);
             Logx.i("official Accessory PTC output hook installed");
         } catch (Throwable error) {
             Logx.w("Accessory PTC output hook failed", error);
         }
     }
 
-    private static boolean isAppleProximity(ScanResult result) {
-        ScanRecord record = result == null ? null : result.getScanRecord();
-        if (record == null) return false;
-        byte[] data = record.getManufacturerSpecificData(76);
-        return data != null && data.length >= 2 && data[0] == 7;
-    }
+    private static volatile Context accessoryContext;
 
-    private static void detachAirPodsListener(Object output) throws Exception {
-        Object provider = readField(output, "f10092b");
-        if (provider == null) return;
-        Object raw = readField(provider, "f10294e");
-        if (!(raw instanceof Map)) return;
-        int detached = 0;
-        for (Object value : ((Map<?, ?>) raw).values()) {
-            if (value == null || !isAppleDiscovery(value)) continue;
-            Object listener = readField(value, "f10462c");
-            if (listener != null) {
-                writeField(value, "f10462c", null);
-                detached++;
+    private static Context accessoryContext() {
+        Context local = accessoryContext;
+        if (local == null) {
+            local = currentApplication();
+            if (local != null) {
+                accessoryContext = local;
+                Logx.setContext(local);
             }
         }
-        if (detached > 0) Logx.i("official Accessory PTC listener detached=" + detached);
+        return local;
     }
 
-    private static boolean isAppleDiscovery(Object value) {
+    /**
+     * :cards: LidRelay's wake arrives as a bind of the ROM's Accessory keep-alive service. The
+     * official binder is still returned; only the wake extras are read.
+     */
+    private void hookLidWake(ClassLoader loader) {
         try {
-            Object options = readField(value, "f10461b");
-            Object filter = call(options, "getDiscoveryFilter");
-            Object filters = call(filter, "getLeScanFilter");
-            if (!(filters instanceof Iterable)) return false;
-            for (Object item : (Iterable<?>) filters) {
-                if (item instanceof ScanFilter && ((ScanFilter) item).getManufacturerId() == 76) {
-                    return true;
+            Class<?> service = Class.forName(LidRelay.OAF_SERVICE, false, loader);
+            Method onBind = service.getDeclaredMethod("onBind", Intent.class);
+            hook(onBind).intercept(chain -> {
+                try {
+                    Object arg = chain.getArg(0);
+                    if (arg instanceof Intent) LidRelay.handleWake((Context) chain.getThisObject(), (Intent) arg);
+                } catch (Throwable error) {
+                    Logx.w("lid wake handling failed", error);
                 }
-            }
-        } catch (Throwable ignored) {
+                return chain.proceed();
+            });
+            Logx.i("official keep-alive lid wake hook installed");
+        } catch (Throwable error) {
+            Logx.w("official keep-alive lid wake hook failed", error);
         }
-        return false;
     }
 
     private void hookCoreService(ClassLoader loader) {
@@ -429,6 +418,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             hook(onStart).intercept(chain -> {
                 try {
                     Object arg = chain.getArg(0);
+                    // LidRelay's fallback wake when :cards could not be bound.
+                    if (arg instanceof Intent && LidRelay.handleWake((Context) chain.getThisObject(), (Intent) arg)) {
+                        return chain.proceed();
+                    }
                     if (arg instanceof Intent) {
                         Bundle bundle = ((Intent) arg).getBundleExtra("serviceNode");
                         if (bundle != null) {
@@ -1119,19 +1112,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             }
         }
         return null;
-    }
-
-    private static void writeField(Object target, String name, Object value) throws Exception {
-        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
-            try {
-                Field field = type.getDeclaredField(name);
-                field.setAccessible(true);
-                field.set(target, value);
-                return;
-            } catch (NoSuchFieldException ignored) {
-            }
-        }
-        throw new NoSuchFieldException(name);
     }
 
     private static Field findFieldWithMethod(Class<?> owner, String methodName) throws NoSuchFieldException {
