@@ -35,6 +35,8 @@ final class LidRelay {
     static final String EXTRA_DATA = "opods_lid_data";
     static final String EXTRA_ADDRESS = "opods_lid_address";
     static final String EXTRA_RSSI = "opods_lid_rssi";
+    /** Readiness ping: wall-clock time the Accessory scan first carried the lid filter. */
+    static final String EXTRA_READY = "opods_lid_ready";
     private static final int APPLE = 0x004C;
     /**
      * The binding only carries the wake and is dropped as soon as :cards has seen it; this bound
@@ -68,7 +70,7 @@ final class LidRelay {
      * 3.4.48/3.4.49 registered, which matched every AirPods message nearby.
      */
     @SuppressWarnings("unchecked")
-    static void adjustPersistentFilters(List<?> filters) {
+    static void adjustPersistentFilters(List<?> filters, Context context) {
         List<Object> list = (List<Object>) filters;
         boolean present = false;
         for (Iterator<Object> it = list.iterator(); it.hasNext(); ) {
@@ -87,6 +89,15 @@ final class LidRelay {
         if (!present) list.add(lidFilter());
         if (FILTER_LOGGED.compareAndSet(false, true)) {
             Logx.i("official persistent scan: AirPods lid-open filter added (hardware mask 07 19 + lid bit)");
+            // Once per Accessory process: lets the MyDevices panel show that this side is live.
+            if (context != null) {
+                Context app = context.getApplicationContext() != null ? context.getApplicationContext() : context;
+                Intent hello = new Intent(OAF_ACTION)
+                        .setComponent(new ComponentName(MYDEVICES, OAF_SERVICE))
+                        .setIdentifier("opods-ready-" + SystemClock.elapsedRealtimeNanos())
+                        .putExtra(EXTRA_READY, System.currentTimeMillis());
+                MAIN.post(() -> bind(app, hello));
+            }
         }
     }
 
@@ -151,10 +162,14 @@ final class LidRelay {
     /** Fallback when :cards cannot be bound: the ROM's own wake target, the MyDevices CoreService. */
     private static void wakeCore(Context context, Intent wake) {
         try {
-            Intent intent = new Intent(CORE_ACTION).setPackage(MYDEVICES)
-                    .putExtra(EXTRA_DATA, wake.getByteArrayExtra(EXTRA_DATA))
-                    .putExtra(EXTRA_ADDRESS, wake.getStringExtra(EXTRA_ADDRESS))
-                    .putExtra(EXTRA_RSSI, wake.getIntExtra(EXTRA_RSSI, 0));
+            Intent intent = new Intent(CORE_ACTION).setPackage(MYDEVICES);
+            if (wake.hasExtra(EXTRA_READY)) {
+                intent.putExtra(EXTRA_READY, wake.getLongExtra(EXTRA_READY, 0L));
+            } else {
+                intent.putExtra(EXTRA_DATA, wake.getByteArrayExtra(EXTRA_DATA))
+                        .putExtra(EXTRA_ADDRESS, wake.getStringExtra(EXTRA_ADDRESS))
+                        .putExtra(EXTRA_RSSI, wake.getIntExtra(EXTRA_RSSI, 0));
+            }
             context.startService(intent);
             Logx.i("lid wake sent to MyDevices CoreService instead");
         } catch (Throwable error) {
@@ -202,11 +217,18 @@ final class LidRelay {
     /** MyDevices side (:cards, or CoreService as fallback): a wake built by {@link #offer}. */
     static boolean handleWake(Context context, Intent intent) {
         if (context == null || intent == null) return false;
+        long readyAt;
         byte[] data;
         try {
+            readyAt = intent.getLongExtra(EXTRA_READY, 0L);
             data = intent.getByteArrayExtra(EXTRA_DATA);
         } catch (Throwable ignored) {
             return false;
+        }
+        if (readyAt > 0L) {
+            CrossProcessState.setAccessoryReady(context, readyAt);
+            Logx.i("Accessory reports the lid-open filter in the official scan");
+            return true;
         }
         if (data == null) return false;
         String address = intent.getStringExtra(EXTRA_ADDRESS);

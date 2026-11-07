@@ -5,9 +5,9 @@
 
 ## 当前版本
 
-- 当前版本：`v3.4.50`（`versionCode 84`，**待真机验证**）
-- 当前 Release：[v3.4.50-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.50-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
-- APK：`OPods-v3.4.50-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.50-arm64-v8a.sha256`
+- 当前版本：`v3.4.51`（`versionCode 85`，**待真机验证**）
+- 当前 Release：[v3.4.51-arm64-v8a](https://github.com/arkylin/OPods/releases/tag/v3.4.51-arm64-v8a)，APK 由 GitHub Actions 构建并正式签名
+- APK：`OPods-v3.4.51-arm64-v8a.apk`；SHA-256 见同一 Release 中的 `OPods-v3.4.51-arm64-v8a.sha256`
 - 签名证书：`CN=OPods Release, OU=Release, O=arkylin, C=CN`；SHA-256 `AB:E8:C3:8E:21:45:CE:77:5B:6C:74:04:65:A8:01:1C:51:A8:72:71:10:3F:86:E8:39:71:66:E1:0F:34:B3:59`
 - 已验证设备：一加 13（`PJZ110`）、ColorOS 17.0.0.103、Android 17、AirPods 5
 - 3.4.19 已完成真机 UI 验收；3.4.20 新增独立“关于”页和逐控件协议/存储标注；3.4.26 已通过一次官方 ACL/弹窗流程复测；3.4.27 切换到 100 年正式 Release 证书；3.4.29–3.4.31 同步官方弹窗、耳机页与 DeviceInfo；3.4.45 通过官方 CoreService IPC 刷新控制中心磁贴电量；3.4.46 修复磁贴充电状态被空快照覆盖；3.4.47 首连有限热身重试以拿到第一包电量。
@@ -29,6 +29,11 @@
   - 一次开盖只唤醒一次 MyDevices，经官方 accessory 保活绑定（`OafPersistentService`）直接送到能稳定注入的 `:cards`，不再依赖注入不上的主进程，也不再走会被官方频控拦掉的 FusionWakeup；
   - 去掉 3.4.48 起把 ROM 过滤放宽成 `07 19` 两字节的 Hook：它让附近所有 AirPods（包括戴在耳朵上时）的每条广播都去唤醒 MyDevices；
   - IRK 校验通过后先把广播里的电量（有 ENC 密钥时为精确值）写进官方弹窗，连上后由 AACP 接管；弹窗已显示同一副耳机时，连上不再重复拉起。
+- 3.4.51 补上“开盖自动连接”：
+  - 官方“回连”弹窗只展示已经连上的耳机，从不发起连接，所以以前耳机不自己回连就一直连不上；现在耳机没连上时改用官方弹窗的连接模式（`device_info` 配对信息），弹出后调用弹窗自己的 `AirpodsDiscoveryViewModel.startConnect()`——和弹窗里“连接/重试”按钮同一个调用，已配对设备走官方 `connect()`，界面依次显示正在连接 → 已连接（电量）或连接失败（重试）；
+  - 同样修好了“通过官方弹窗连接”按钮和“取下断开音频、戴回”这两条：以前它们弹的也是只展示状态的回连弹窗，不会真的连接；
+  - 面板“开盖弹窗”新增“官方扫描”一行：accessory 的官方扫描第一次带上开盖过滤时（每个 accessory 进程一次）通知 MyDevices，这里显示时间；“未确认”说明 accessory 还没加载新版模块；
+  - 设备页“识别密钥”新增“重新获取识别密钥”。
 
 AirPods Pro 3 的能力映射已写入代码，但 ATT、助听、PPE、心率和头部手势仍需对应真机验收。
 
@@ -92,14 +97,14 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 | 进程 | Hook 点数 | 职责 |
 | --- | ---: | --- |
-| `com.heytap.mydevices` | 32 | 官方 AirPods 弹窗、开盖唤醒接收、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
+| `com.heytap.mydevices` | 33 | 官方 AirPods 弹窗（含开盖时调用官方连接）、开盖唤醒接收、详情页、设置页、AACP/ATT、电池 UI/DeviceInfo 与假断开过滤 |
 | `com.heytap.accessory` | 2 | 给官方常驻扫描追加 AirPods 开盖硬件过滤；一次开盖唤醒一次 MyDevices `:cards` |
 | `com.android.bluetooth` | 1 | 只过滤 ColorOS 连接时发送的 `DISABLE_OFF` 帧 |
 
 > 计数口径是源码中的 `hook(...)` 调用点。`AirpodsScanPolicy` 会遍历所有参数数不少于 5 的构造器，
 > 因此运行时实际 Hook 的方法数可能多于调用点数。
 
-### `com.heytap.mydevices`：32 个 Hook 点
+### `com.heytap.mydevices`：33 个 Hook 点
 
 | # | 目标类 / 方法 | 作用 |
 | ---: | --- | --- |
@@ -117,24 +122,25 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 | 12 | `InnerIpcManager` 构造器 | 捕获 `:cards` 进程的官方 IPC 管理器，供 AACP 电量快照走官方 CoreService 通道。 |
 | 13 | `AirpodsManager.process(String, String, Bundle, int)`（按签名回退） | 只识别自定义 `OPODS_AACP_BATTERY_V1`，在核心进程调用官方 `AirpodsScanPolicy.onBatteryLevelChanged`；其他请求原样放行。 |
 | 14 | `AirpodsSettingPreferencesFragment.onCreatePreferences(Bundle, String)` | 官方设置页构建完成后注入自适应滑杆和“AirPods 增强”入口。 |
-| 15 | `AirpodsDiscoveryActivity.onResume()` | 官方弹窗显示时，按弹窗 Intent/ViewModel 中的设备启动 AACP 电量通道，并允许链路重试。 |
+| 15 | `AirpodsDiscoveryActivity.onResume()` | 官方弹窗显示时，按弹窗 Intent/ViewModel 中的设备启动 AACP 电量通道，并允许链路重试；弹窗带模块的连接标记（开盖、手动连接、戴回）时，调用一次官方 `getViewModel().startConnect()`。 |
 | 16 | `AirpodsDiscoveryActivity.onPause()` | 弹窗隐藏后保留 AACP 电量同步，但不再允许链路重试。 |
-| 17 | `AirpodsDetailPanelFragment.bindPanelBodyViews(View)` | 详情页绑定后安装首屏噪声快捷选择器。 |
-| 18 | `AirpodsDetailPanelFragment.initView(View)` | 详情页初始化时再次尝试安装；`WeakHashMap` 保证同一 Fragment 不会重复注入。 |
-| 19 | `AirpodsDetailPanelFragment.clearPanelBodyViewRefs()` | 清理视图前释放模块持有的快捷选择器状态与监听。 |
-| 20 | `androidx.preference.SeekBarPreference` 的单参数 `void` 绑定方法（优先 `Z`，失败按签名回退） | 仅装饰 `SliderRegistry` 标记的模块滑杆，补刻度、轨道与 COUI 卡片样式；Hook 失败不影响滑杆本身的 AACP 控制。 |
-| 21 | `AirpodsSettingActivity.updateFeatureSupport(int)` | 官方刷新后强制展开噪声选择器、空间音频/佩戴检测/对话分组，并设置佩戴检查支持。 |
-| 22 | `AirpodsSettingActivity.onResume()` | 从官方 ViewModel 读取当前 `BluetoothDevice` 并交给控制器，标记设置页已打开。 |
-| 23 | `AirpodsSettingActivity.onStop()` | 页面离开前台时标记关闭，停止 ATT，AACP 进入只保留电量同步、不重试的模式。 |
-| 24 | `AirpodsSettingActivity.onDestroy()` | 页面销毁时同样标记关闭，并释放官方噪声选择器的同步监听。 |
-| 25 | `AirpodsSettingActivity.onNoiseControlClick(int)` | 模式 1–4 直接写入 AACP 并更新官方 UI，不再依赖 AirPods 走不通的官方噪声下发路径。 |
-| 26 | `AirpodsSettingActivity.updateCurrentFeature(int)` | ROM 用自己蓝牙回调或恢复页面时刷新降噪栏：换成 AACP 实时模式，并只移动选中项（ROM 原实现会重建整条栏，导致图标闪烁）。 |
-| 27 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 类型 `4`（噪声）、`16`（对话感知）、`32`（佩戴检测）改走 AACP；其他类型继续官方实现。 |
-| 28 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗；忽略模块自身触发的重绘。 |
-| 29 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
-| 30 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
-| 31 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
-| 32 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
+| 17 | `AirpodsDiscoveryActivity.onNewIntent(Intent)` | 弹窗是 singleInstance，已打开时的新请求从这里进来；带连接标记时同样调用一次官方 `startConnect()`。 |
+| 18 | `AirpodsDetailPanelFragment.bindPanelBodyViews(View)` | 详情页绑定后安装首屏噪声快捷选择器。 |
+| 19 | `AirpodsDetailPanelFragment.initView(View)` | 详情页初始化时再次尝试安装；`WeakHashMap` 保证同一 Fragment 不会重复注入。 |
+| 20 | `AirpodsDetailPanelFragment.clearPanelBodyViewRefs()` | 清理视图前释放模块持有的快捷选择器状态与监听。 |
+| 21 | `androidx.preference.SeekBarPreference` 的单参数 `void` 绑定方法（优先 `Z`，失败按签名回退） | 仅装饰 `SliderRegistry` 标记的模块滑杆，补刻度、轨道与 COUI 卡片样式；Hook 失败不影响滑杆本身的 AACP 控制。 |
+| 22 | `AirpodsSettingActivity.updateFeatureSupport(int)` | 官方刷新后强制展开噪声选择器、空间音频/佩戴检测/对话分组，并设置佩戴检查支持。 |
+| 23 | `AirpodsSettingActivity.onResume()` | 从官方 ViewModel 读取当前 `BluetoothDevice` 并交给控制器，标记设置页已打开。 |
+| 24 | `AirpodsSettingActivity.onStop()` | 页面离开前台时标记关闭，停止 ATT，AACP 进入只保留电量同步、不重试的模式。 |
+| 25 | `AirpodsSettingActivity.onDestroy()` | 页面销毁时同样标记关闭，并释放官方噪声选择器的同步监听。 |
+| 26 | `AirpodsSettingActivity.onNoiseControlClick(int)` | 模式 1–4 直接写入 AACP 并更新官方 UI，不再依赖 AirPods 走不通的官方噪声下发路径。 |
+| 27 | `AirpodsSettingActivity.updateCurrentFeature(int)` | ROM 用自己蓝牙回调或恢复页面时刷新降噪栏：换成 AACP 实时模式，并只移动选中项（ROM 原实现会重建整条栏，导致图标闪烁）。 |
+| 28 | `AirpodsSettingViewModel.setExtendFeatureStatus(int, int)` | 类型 `4`（噪声）、`16`（对话感知）、`32`（佩戴检测）改走 AACP；其他类型继续官方实现。 |
+| 29 | `AirPodsDialogFragment$AirPodsDialogContentFragment.t0(int[])` | 记录官方弹窗电池组件，并在 AACP 电量变化时刷新官方弹窗；忽略模块自身触发的重绘。 |
+| 30 | `AirpodsDetailPreferencesFragment.initAirpodsCardAppearance()` | 记录官方耳机页的电池 binder，供 AACP 状态即时刷新。 |
+| 31 | 官方电池 binder 的 `void(int[], boolean)` 方法（按签名回退） | 官方刷新后再次用 AACP 的组件级电量/充电状态覆盖，避免框架缓存导致“已佩戴仍显示充电”。 |
+| 32 | `AirpodsBluetoothManager.C()` | 记录用户主动断开的时间戳，用于区分主动断开与 HFP 空闲链路掉线。 |
+| 33 | `AirpodsBluetoothManager.i0(String, BluetoothDevice)` | 用户主动断开 8 秒窗口外收到 `STATE_DISCONNECTED` 时，如果设备或管理器仍报告已连接，则吞掉这次假断开；其余状态原样放行。 |
 
 ### `com.heytap.accessory`：2 个 Hook 点
 
@@ -157,7 +163,8 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 2. accessory：官方结果出口把命中的广播交给 `LidGate`，同一次开盖只放行一次，经官方保活服务 `OafPersistentService` 的绑定把广播数据送到 MyDevices `:cards`，随即解绑。
 3. `:cards`：解析 `0x07` 邻近消息（盒盖状态、型号、电量、佩戴和连接状态）。
 4. 身份校验：系统已解析成身份地址时直接比对；否则用 AirPods 通过 AACP `0x31` 下发的 IRK 校验广播里的可解析私有地址（RPA）。有 ENC 密钥时解密出精确电量，先显示在官方弹窗上。
-5. 只有自己的耳机才会启动官方 `AirpodsDiscoveryActivity`；还没拿到密钥的耳机，按“未拿到密钥时也响应”开关决定是否按未验证方式弹窗。之后耳机回连、AACP 接管电量。
+5. 只有自己的耳机才会启动官方 `AirpodsDiscoveryActivity`；还没拿到密钥的耳机，按“未拿到密钥时也响应”开关决定是否按未验证方式弹窗。
+6. 已经连上：官方回连弹窗显示电量。没连上：官方弹窗的连接模式（`device_info`），弹出后调用它自己的 `startConnect()`（与“连接/重试”按钮相同，已配对设备走官方 `connect()`），显示正在连接 → 已连接（电量）/ 连接失败（重试）。连上后 AACP 接管电量。
 
 限制：和 OPPO 自家耳机一样只在亮屏时扫描，息屏开盖不会弹窗；必须勾选 `com.heytap.accessory` 作用域，装新版后停止一次 accessory 才会带上新注入。
 
@@ -165,7 +172,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 ### 明确不 Hook
 
-- `AirpodsDiscoveryActivity` 只 Hook `onResume()` / `onPause()` 来启动和节流官方 AACP 电量通道；不替换 Activity，也不改变官方弹窗流程。
+- `AirpodsDiscoveryActivity` 只 Hook `onResume()` / `onPause()` / `onNewIntent()`：启动和节流官方 AACP 电量通道，带连接标记时调用一次官方 `startConnect()`；不替换 Activity，弹窗的界面、状态和连接都由官方代码完成。
 - `com.heytap.accessory` 只保留上述 2 个 Hook 点（持久过滤列表与结果出口）；不碰官方扫描的启停、档位和亮屏门控，Off 帧过滤和 AACP/ATT 仍只在 MyDevices/Bluetooth 中完成。
 - `com.oplus.wirelesssettings`：旧版“蓝牙设置 → 耳机功能”实验路径已删除，当前只使用 MyDevices 官方页。
 - `com.oplus.melody`、Launcher、SystemUI、Settings 和第三方 App：不 Hook。
@@ -273,7 +280,8 @@ GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再�
 - `MyDevices hooks installed`、`official Accessory PTC output hook installed`、`official Accessory persistent filter hook installed`
 - `Hook failed` / `hook failed`
 - accessory：`official persistent scan: AirPods lid-open filter added`（亮屏后官方扫描并入过滤时）、`official scan heard an AirPods lid opening rssi=... (#n)`、`dropped broad legacy AirPods filter`
-- `:cards`：`official keep-alive lid wake hook installed`、`lid wake from Accessory rssi=...`、`Case-open advertisement for ...`、`case-open ignored: ...`、`lid advert battery -> official popup ...`
+- `:cards`：`official keep-alive lid wake hook installed`、`Accessory reports the lid-open filter in the official scan`、`lid wake from Accessory rssi=...`、`Case-open advertisement for ...`、`case-open ignored: ...`、`lid advert battery -> official popup ...`、`official AirPods popup requested (official connect)`、`official popup connect started`
+- 不用 ADB 也能看：面板“连接 → 开盖弹窗”的“官方扫描”（accessory 侧是否生效）和“最近开盖广播”（最近一次送到 MyDevices 的开盖广播与校验结果）
 - `proximity keys stored: IRK=true ENC=true`
 - `official feature support forced for AirPods`
 - `official popup battery hook installed` / `official detail battery hook installed`

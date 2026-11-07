@@ -330,7 +330,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 Object result = chain.proceed();
                 if (result instanceof java.util.List) {
                     try {
-                        LidRelay.adjustPersistentFilters((java.util.List<?>) result);
+                        LidRelay.adjustPersistentFilters((java.util.List<?>) result, accessoryContext());
                     } catch (Throwable error) {
                         if (ADJUST_ERROR_LOGGED.compareAndSet(false, true)) {
                             Logx.w("persistent filter adjust failed", error);
@@ -526,6 +526,12 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 } catch (Throwable error) {
                     Logx.w("discovery battery session failed", error);
                 }
+                try {
+                    Object self = chain.getThisObject();
+                    if (self instanceof Activity) requestOfficialConnect(self, ((Activity) self).getIntent());
+                } catch (Throwable error) {
+                    Logx.w("official popup connect failed", error);
+                }
                 return result;
             });
             hook(onPause).intercept(chain -> {
@@ -538,10 +544,51 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 }
                 return result;
             });
+            try {
+                // singleInstance: a second request reaches the open popup here, not in onCreate.
+                Method onNewIntent = activity.getDeclaredMethod("onNewIntent", Intent.class);
+                hook(onNewIntent).intercept(chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        Object arg = chain.getArg(0);
+                        if (arg instanceof Intent) requestOfficialConnect(chain.getThisObject(), (Intent) arg);
+                    } catch (Throwable error) {
+                        Logx.w("official popup connect failed", error);
+                    }
+                    return result;
+                });
+            } catch (Throwable error) {
+                Logx.w("official popup onNewIntent hook failed", error);
+            }
             Logx.i("official AirPods discovery battery hook installed");
         } catch (Throwable error) {
             Logx.w("official AirPods discovery battery hook failed", error);
         }
+    }
+
+    private static final android.os.Handler MAIN = new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /**
+     * A popup opened for a pair that is not connected: run the popup's own connect, the same
+     * call as its "连接" / "重试" buttons (AirpodsDiscoveryViewModel.startConnect ->
+     * AirpodsBluetoothManager setDevice + startBound -> connect() for a bonded device). The
+     * official UI then shows connecting, connected with battery, or the retry panel.
+     */
+    private static void requestOfficialConnect(Object activity, Intent intent) {
+        if (activity == null || intent == null) return;
+        if (!intent.getBooleanExtra(AirPodsController.EXTRA_LID_CONNECT, false)) return;
+        intent.removeExtra(AirPodsController.EXTRA_LID_CONNECT); // once per request
+        // After the popup's own onResume / fragment commit, like a tap on its button.
+        MAIN.post(() -> {
+            try {
+                Object viewModel = call(activity, "getViewModel");
+                if (viewModel == null) throw new IllegalStateException("no popup view model");
+                viewModel.getClass().getMethod("startConnect").invoke(viewModel);
+                Logx.i("official popup connect started");
+            } catch (Throwable error) {
+                Logx.w("official popup connect failed", error);
+            }
+        });
     }
 
     /** The pair the official popup was started for: its Intent first, then its view model. */
@@ -552,6 +599,9 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 Intent intent = ((Activity) activity).getIntent();
                 if (intent != null) {
                     device = intent.getParcelableExtra("bluetooth_device", BluetoothDevice.class);
+                    if (device == null) {
+                        device = intent.getParcelableExtra(AirPodsController.EXTRA_LID_DEVICE, BluetoothDevice.class);
+                    }
                 }
             }
         } catch (Throwable ignored) {

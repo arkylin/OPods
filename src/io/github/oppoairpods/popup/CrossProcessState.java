@@ -19,6 +19,7 @@ final class CrossProcessState {
     private static final String AUTO_CONNECT = "auto_connect";
     private static final String LID_FALLBACK = "lid_open_unverified_fallback";
     private static final String LAST_ADVERT = "last_lid_advert";
+    private static final String ACCESSORY_READY = "accessory_lid_filter_ready_at";
     private static final String IRK_PREFIX = "irk_";
     private static final String ENC_PREFIX = "enc_";
     private static final String SETTINGS_OPEN = "settings_open";
@@ -76,6 +77,20 @@ final class CrossProcessState {
 
     static String lastAdvert(Context context) {
         return read(context, LAST_ADVERT);
+    }
+
+    /** When the Accessory scan last reported carrying the lid filter (0 when never). */
+    static long accessoryReadyAt(Context context) {
+        try {
+            String value = read(context, ACCESSORY_READY);
+            return value == null ? 0L : Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+            return 0L;
+        }
+    }
+
+    static void setAccessoryReady(Context context, long at) {
+        write(context, ACCESSORY_READY, String.valueOf(at));
     }
 
     static void setProximityKeys(Context context, String address, byte[] irk, byte[] enc) {

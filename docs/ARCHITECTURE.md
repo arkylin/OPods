@@ -90,7 +90,15 @@ ColorOS 私有 DEX，因此以下类名、方法名和混淆名属于版本相�
    `AirPodsController.onCaseAdvertisement` 做身份校验：系统已解析的身份地址直接比对；否则用 AirPods 经 AACP
    `0x30/0x31` 下发的 IRK 校验 RPA（`ProximityCrypto.verifyRpa`，即蓝牙规范 ah 函数）。有 ENC 密钥时解密出精确电量。
 6. 通过校验的那副（或用户允许时、还没拿到密钥的那副）启动官方 `AirpodsDiscoveryActivity`；已验证时先把广播电量
-   写进官方弹窗，耳机回连后 AACP 接管。弹窗已显示同一副耳机时，ACL 连上不再重复拉起。
+   写进官方弹窗。弹窗已显示同一副耳机时，ACL 连上不再重复拉起。
+7. 连接（3.4.51）：官方“回连”弹窗（`bluetooth_device` + `device_model`）只展示已连上的耳机，`getCurrentState()`
+   在这种模式下恒为 `STATE_UNKNOW`，从不发起连接。耳机没连上时改用官方弹窗的连接模式：`device_info` 放一个官方
+   `DeviceInfo`（broadcastType 2），弹窗进入发现/连接状态机；`onResume`/`onNewIntent` 看到模块的连接标记后调用一次
+   `AirpodsDiscoveryViewModel.startConnect()`，即弹窗“连接/重试”按钮的同一调用：`AirpodsBluetoothManager.b0()`
+   （setDevice）+ `f0()`（startBound，已配对设备直接官方 `connect()`，20 秒超时）。界面由官方显示正在连接 →
+   已连接（电量）/ 连接失败（重试）。手动“通过官方弹窗连接”与“戴回恢复音频”（ACL 仍在、A2DP/HFP 已断）走同一条。
+8. accessory 侧第一次把开盖过滤并进官方扫描时，用同一个保活绑定向 `:cards` 发一次就绪通知（每个 accessory 进程一次），
+   面板“官方扫描”一行显示时间，用于不接 ADB 时判断 accessory 是否加载了新版模块。
 
 限制：和 OPPO 自家耳机一样只在亮屏时扫描，息屏开盖不会弹窗；需要勾选 `com.heytap.accessory` 作用域，
 装新版后停止一次 accessory（官方常驻进程）才会带上新注入。
