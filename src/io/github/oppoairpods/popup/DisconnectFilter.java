@@ -44,8 +44,9 @@ final class DisconnectFilter {
                 Logx.w("disconnect intent hook unavailable", error);
             }
             module.hook(dispatch).intercept(chain -> {
+                String state = null;
                 try {
-                    String state = (String) chain.getArg(0);
+                    state = (String) chain.getArg(0);
                     if ("STATE_DISCONNECTED".equals(state)
                             && System.currentTimeMillis() - userDisconnectAt > USER_WINDOW_MS) {
                         BluetoothDevice device = (BluetoothDevice) chain.getArg(1);
@@ -57,11 +58,29 @@ final class DisconnectFilter {
                 } catch (Throwable error) {
                     Logx.w("disconnect filter failed", error);
                 }
+                traceConnect(state);
                 return chain.proceed();
             });
             Logx.i("MyDevices disconnect filter installed");
         } catch (Throwable error) {
             Logx.w("disconnect filter unavailable", error);
+        }
+    }
+
+    /** The official connect's progress, appended to the panel's "最近开盖连接" line. */
+    private static void traceConnect(String state) {
+        String step;
+        if ("STATE_START_BOND".equals(state)) step = "官方开始连接";
+        else if ("STATE_CONNECTED".equals(state)) step = "已连接";
+        else if ("STATE_START_BOND_TIMEOUT".equals(state)) step = "官方连接失败/超时（弹窗显示重试）";
+        else if ("STATE_DISCONNECTED".equals(state)) step = "已断开";
+        else return;
+        try {
+            android.content.Context context = AirPodsMyDevicesModule.context();
+            if (context != null) {
+                CrossProcessState.appendLastConnect(context, step, AirPodsMyDevicesModule.CONNECT_TRACE_MS);
+            }
+        } catch (Throwable ignored) {
         }
     }
 

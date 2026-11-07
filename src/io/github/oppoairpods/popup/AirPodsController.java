@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.os.Handler;
 import android.os.Looper;
@@ -97,6 +98,7 @@ final class AirPodsController implements AacpSession.Listener {
     private volatile int wearSecondary = -1;
     private volatile long lastPopupAt;
     private volatile long lastCaseAt;
+    private volatile long lastConnectAt;
     // A listening mode the user just picked, kept on screen until the AirPods confirm it.
     private static final long MODE_CONFIRM_MS = 3000L;
     private static final long MODE_QUEUE_MS = 15000L;
@@ -230,8 +232,16 @@ final class AirPodsController implements AacpSession.Listener {
     }
 
     String lastAdvertSummary() {
-        String raw = CrossProcessState.lastAdvert(context);
-        if (raw == null || raw.isEmpty()) return "尚未收到";
+        return stamped(CrossProcessState.lastAdvert(context), "尚未收到");
+    }
+
+    /** What the last lid / manual connect request did, step by step (panel diagnostics). */
+    String lastConnectSummary() {
+        return stamped(CrossProcessState.lastConnect(context), "尚未发生");
+    }
+
+    private static String stamped(String raw, String empty) {
+        if (raw == null || raw.isEmpty()) return empty;
         int separator = raw.indexOf('|');
         try {
             long at = Long.parseLong(raw.substring(0, separator));
@@ -1125,10 +1135,13 @@ final class AirPodsController implements AacpSession.Listener {
         return result;
     }
 
-    /** User-initiated ("通过官方弹窗连接"): shown even over the settings page; connects if down. */
+    /** User-initiated ("通过官方弹窗连接"): shown even over the settings page; connects if audio is down. */
     void launchOfficialPopupNow(BluetoothDevice device) {
-        lastPopupAt = System.currentTimeMillis();
-        startOfficialPopup(device, CONNECT_IF_DOWN);
+        long now = System.currentTimeMillis();
+        lastPopupAt = now;
+        boolean connect = wantsOfficialConnect(device, CONNECT_IF_DOWN);
+        if (connect) lastConnectAt = now;
+        startOfficialPopup(device, connect, "手动");
     }
 
     private void scheduleOfficialPopup(BluetoothDevice device, long delayMs) {
@@ -1145,21 +1158,97 @@ final class AirPodsController implements AacpSession.Listener {
         launchOfficialPopup(device, CONNECT_NEVER);
     }
 
-    /** The link is up (ACL connected): the official back-link popup shows it. */
+    /** Status only: the official back-link popup. */
     private static final int CONNECT_NEVER = 0;
-    /** Case opened / user asked: connect through the official popup when the link is down. */
+    /** Case opened / user asked: run the official connect unless the pair's audio is already up. */
     private static final int CONNECT_IF_DOWN = 1;
-    /** Worn again after audio was dropped on purpose: ACL is up but A2DP/HFP are not. */
-    private static final int CONNECT_ALWAYS = 2;
+    /** Lid advert, button and re-wear may ask at once: one official connect per window. */
+    private static final long CONNECT_REPEAT_MS = 3500L;
 
-    private void launchOfficialPopup(BluetoothDevice device, int connect) {
+    private void launchOfficialPopup(BluetoothDevice device, int mode) {
         if (settingsPageOpen || CrossProcessState.settingsOpen(context)) return;
-        // Already showing this pair (opened on the lid, then the link came up): keep it.
-        if (popupVisible && device != null && device.getAddress().equalsIgnoreCase(address)) return;
+        boolean connect = wantsOfficialConnect(device, mode);
         long now = System.currentTimeMillis();
-        if (now - lastPopupAt < 3500L) return;
+        if (connect) {
+            // A status popup already on screen must not swallow a connect: on a lid opening the
+            // AirPods often bring their ACL up before the lid advert gets here, and that link's
+            // popup used to win. The singleInstance popup takes this one through onNewIntent.
+            if (now - lastConnectAt < CONNECT_REPEAT_MS) return;
+            lastConnectAt = now;
+        } else {
+            // Already showing this pair (opened on the lid, then the link came up): keep it.
+            if (popupVisible && device != null && device.getAddress().equalsIgnoreCase(address)) return;
+            if (now - lastPopupAt < 3500L) return;
+        }
         lastPopupAt = now;
-        startOfficialPopup(device, connect);
+        startOfficialPopup(device, connect, mode == CONNECT_IF_DOWN ? "开盖" : null);
+    }
+
+    /**
+     * Whether a popup for this pair should run the official connect. The ACL is not the test:
+     * on a lid opening AirPods bring only their ACL (and their own control channel) up to the
+     * phone they used last and leave A2DP/HFP to the phone. 3.4.51 took that ACL for
+     * "connected" and showed the status-only popup, so the pair never got its audio.
+     */
+    private boolean wantsOfficialConnect(BluetoothDevice device, int mode) {
+        return device != null && mode == CONNECT_IF_DOWN && !isAudioConnected(device);
+    }
+
+    /** Time the AirPods get to bring audio up by themselves before the popup connects it. */
+    private static final long BACKLINK_CONNECT_DELAY_MS = 800L;
+
+    /**
+     * The official back-link popup is on screen: the ROM opens it when AirPods bring their ACL up
+     * by themselves (lid opened next to the phone they used last). That popup only shows status,
+     * and AirPods do not connect A2DP/HFP to this phone on their own (11-04 dump: remote-initiated
+     * ACL, then the phone's own CONNECT), so the pair stayed without audio. When its audio is
+     * still down shortly after, the same popup is switched to its connect mode, like a tap on
+     * its "连接" button. One request per back-link popup; nothing runs once it is closed.
+     */
+    void onBackLinkPopup(BluetoothDevice device) {
+        if (device == null || !autoConnect() || !isDeviceConnected(device)) return;
+        main.postDelayed(() -> {
+            try {
+                if (!popupVisible || !isDeviceConnected(device) || isAudioConnected(device)) return;
+                long now = System.currentTimeMillis();
+                if (now - lastConnectAt < CONNECT_REPEAT_MS) return;
+                lastConnectAt = now;
+                lastPopupAt = now;
+                startOfficialPopup(device, true, "回连");
+            } catch (Throwable error) {
+                Logx.w("back-link connect failed", error);
+            }
+        }, BACKLINK_CONNECT_DELAY_MS);
+    }
+
+    /**
+     * Media or call audio of this pair is routed (A2DP / HFP output known to the audio service).
+     * A pair that is connected but not the active one reads as down; the official connect then
+     * finds its profiles already up and just shows it connected.
+     */
+    private boolean isAudioConnected(BluetoothDevice device) {
+        try {
+            AudioManager audio = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            if (audio == null) return false;
+            for (AudioDeviceInfo info : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
+                int type = info.getType();
+                if (type != AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
+                        && type != AudioDeviceInfo.TYPE_BLUETOOTH_SCO) continue;
+                if (sameAddress(device.getAddress(), info.getAddress())) return true;
+            }
+        } catch (Throwable error) {
+            Logx.w("audio route check failed", error);
+        }
+        return false;
+    }
+
+    /** Equal Bluetooth addresses; also accepts the anonymized "XX:XX:XX:XX:ab:cd" form. */
+    private static boolean sameAddress(String expected, String reported) {
+        if (expected == null || reported == null || expected.length() != reported.length()) return false;
+        if (reported.equalsIgnoreCase(expected)) return true;
+        return expected.length() > 12
+                && reported.regionMatches(true, 0, "XX:XX:XX:XX:", 0, 12)
+                && reported.regionMatches(true, 12, expected, 12, expected.length() - 12);
     }
 
     /** Extra marking a popup that should run the official connect once it is on screen. */
@@ -1171,18 +1260,21 @@ final class AirPodsController implements AacpSession.Listener {
     /** DeviceInfo.broadcastType of a pair the popup may connect (AirpodsScanHelper type 2). */
     private static final int OFFICIAL_BROADCAST_PAIR = 2;
 
-    private void startOfficialPopup(BluetoothDevice device, int connectMode) {
+    /**
+     * @param source "开盖" / "手动" / "戴回" / "回连": recorded for the panel's "最近开盖连接" line;
+     *               null for the status popup of an ACL that came up.
+     */
+    private void startOfficialPopup(BluetoothDevice device, boolean connectWanted, String source) {
+        boolean acl = device != null && isDeviceConnected(device);
         try {
             Intent intent = new Intent("com.oplus.mydevices.AIRPODS_DISCOVERY");
             intent.setClassName("com.heytap.mydevices",
                     "com.heytap.mydevices.plugin.airpods.ui.AirpodsDiscoveryActivity");
-            // The official back-link popup only reports a link that is already up. A pair that is
-            // not connected gets the official discovery popup instead, which connects through
+            // The official back-link popup only reports a link that is already up. A pair without
+            // audio gets the official discovery popup instead, which connects through
             // AirpodsDiscoveryViewModel.startConnect() (setDevice + startBound -> connect()) and
             // shows connecting / connected / retry itself.
-            boolean wanted = connectMode == CONNECT_ALWAYS
-                    || (connectMode == CONNECT_IF_DOWN && !isDeviceConnected(device));
-            boolean connect = wanted && device != null && putOfficialPairInfo(intent, device);
+            boolean connect = connectWanted && device != null && putOfficialPairInfo(intent, device);
             if (connect) {
                 intent.putExtra(EXTRA_LID_CONNECT, true);
                 intent.putExtra(EXTRA_LID_DEVICE, device);
@@ -1192,10 +1284,16 @@ final class AirPodsController implements AacpSession.Listener {
             }
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             context.startActivity(intent);
-            Logx.i(connect ? "official AirPods popup requested (official connect)"
-                    : "official AirPods popup requested");
+            if (source != null) {
+                CrossProcessState.setLastConnect(context, source + "（ACL " + (acl ? "已连" : "未连") + "）"
+                        + (connect ? "音频未连，请求官方连接"
+                        : connectWanted ? "官方配对信息不可用，只显示状态" : "音频已连接，只显示状态"));
+            }
+            Logx.i((connect ? "official AirPods popup requested (official connect"
+                    : "official AirPods popup requested (status") + ", acl=" + acl + ")");
         } catch (Throwable error) {
             Logx.w("official popup failed", error);
+            if (source != null) CrossProcessState.setLastConnect(context, source + "：弹窗启动失败 " + error);
         }
     }
 
@@ -1362,8 +1460,10 @@ final class AirPodsController implements AacpSession.Listener {
                 // the ACL is still up, so only connect() brings A2DP/HFP back.
                 if (device != null) {
                     main.post(() -> {
-                        lastPopupAt = System.currentTimeMillis();
-                        startOfficialPopup(device, CONNECT_ALWAYS);
+                        long now = System.currentTimeMillis();
+                        lastPopupAt = now;
+                        lastConnectAt = now;
+                        startOfficialPopup(device, true, "戴回");
                     });
                 }
             }

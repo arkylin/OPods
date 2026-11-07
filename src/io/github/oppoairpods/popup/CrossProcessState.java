@@ -19,6 +19,7 @@ final class CrossProcessState {
     private static final String AUTO_CONNECT = "auto_connect";
     private static final String LID_FALLBACK = "lid_open_unverified_fallback";
     private static final String LAST_ADVERT = "last_lid_advert";
+    private static final String LAST_CONNECT = "last_lid_connect";
     private static final String ACCESSORY_READY = "accessory_lid_filter_ready_at";
     private static final String IRK_PREFIX = "irk_";
     private static final String ENC_PREFIX = "enc_";
@@ -77,6 +78,36 @@ final class CrossProcessState {
 
     static String lastAdvert(Context context) {
         return read(context, LAST_ADVERT);
+    }
+
+    /** Starts the trace of one official connect request ("time|step"), shown on the panel. */
+    static void setLastConnect(Context context, String step) {
+        write(context, LAST_CONNECT, System.currentTimeMillis() + "|" + step);
+    }
+
+    /**
+     * Adds a later step (popup / official state) to a trace started within {@code windowMs};
+     * a step equal to the last one is not repeated.
+     */
+    static void appendLastConnect(Context context, String step, long windowMs) {
+        synchronized (LOCK) {
+            Properties values = load(context);
+            String current = values.getProperty(LAST_CONNECT);
+            if (current == null || current.endsWith(step)) return;
+            int separator = current.indexOf('|');
+            try {
+                long at = Long.parseLong(current.substring(0, separator));
+                if (System.currentTimeMillis() - at > windowMs) return;
+            } catch (RuntimeException ignored) {
+                return;
+            }
+            values.setProperty(LAST_CONNECT, current + " → " + step);
+            save(context, values);
+        }
+    }
+
+    static String lastConnect(Context context) {
+        return read(context, LAST_CONNECT);
     }
 
     /** When the Accessory scan last reported carrying the lid filter (0 when never). */

@@ -97,6 +97,16 @@ ColorOS 私有 DEX，因此以下类名、方法名和混淆名属于版本相�
    `AirpodsDiscoveryViewModel.startConnect()`，即弹窗“连接/重试”按钮的同一调用：`AirpodsBluetoothManager.b0()`
    （setDevice）+ `f0()`（startBound，已配对设备直接官方 `connect()`，20 秒超时）。界面由官方显示正在连接 →
    已连接（电量）/ 连接失败（重试）。手动“通过官方弹窗连接”与“戴回恢复音频”（ACL 仍在、A2DP/HFP 已断）走同一条。
+   判断“要不要连接”看音频而不是 ACL（3.4.52）：开盖时 AirPods 常先自己连上 ACL（只有它自己的控制通道），A2DP/HFP
+   要手机去连；3.4.51 以 ACL 判断，于是只弹回连弹窗、从不连接。现在以 `AudioManager.getDevices(OUTPUTS)` 里是否有
+   这副耳机的 A2DP/SCO 输出为准；连接请求单独去重（3.5 秒），不受“状态弹窗已显示/刚弹过”的拦截，已在屏幕上的
+   单实例弹窗经 `onNewIntent` 接到它。每次请求的过程（来源、ACL/音频状态、`startConnect` 是否调用、官方
+   `AirpodsBluetoothManager.i0()` 报出的开始连接/已连接/超时）写进面板“最近开盖连接”，状态复用已有的 `i0` Hook。
+   回连补全（3.4.52）：AirPods 自己连上 ACL 时（11-04 dump：`is_locally_initiated:false`，随后 HFP 状态机第一条是
+   手机侧的 `CONNECT`，A2DP/HFP 不会由耳机发起），官方 `AirpodsManager`（消息 1000）弹出回连弹窗
+   （`bluetooth_device` + `device_model`），它只显示状态。`:cards` 的弹窗 `onResume`/`onNewIntent` Hook 看到回连 Intent
+   （每个 Intent 标记一次）后 0.8 秒检查：弹窗仍在、ACL 仍在、音频仍未接通、“开盖自动连接”开着，才发出上面的连接模式
+   请求，官方弹窗原地切到连接界面并 `startConnect()`。只在官方弹窗可见时、每个回连弹窗最多一次，不是重连看门狗。
 8. accessory 侧第一次把开盖过滤并进官方扫描时，用同一个保活绑定向 `:cards` 发一次就绪通知（每个 accessory 进程一次），
    面板“官方扫描”一行显示时间，用于不接 ADB 时判断 accessory 是否加载了新版模块。
 

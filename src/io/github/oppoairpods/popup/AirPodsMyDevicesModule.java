@@ -528,7 +528,11 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                 }
                 try {
                     Object self = chain.getThisObject();
-                    if (self instanceof Activity) requestOfficialConnect(self, ((Activity) self).getIntent());
+                    if (self instanceof Activity) {
+                        Intent intent = ((Activity) self).getIntent();
+                        requestOfficialConnect(self, intent);
+                        completeBackLink(intent);
+                    }
                 } catch (Throwable error) {
                     Logx.w("official popup connect failed", error);
                 }
@@ -551,7 +555,10 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     Object result = chain.proceed();
                     try {
                         Object arg = chain.getArg(0);
-                        if (arg instanceof Intent) requestOfficialConnect(chain.getThisObject(), (Intent) arg);
+                        if (arg instanceof Intent) {
+                            requestOfficialConnect(chain.getThisObject(), (Intent) arg);
+                            completeBackLink((Intent) arg);
+                        }
                     } catch (Throwable error) {
                         Logx.w("official popup connect failed", error);
                     }
@@ -580,15 +587,58 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         intent.removeExtra(AirPodsController.EXTRA_LID_CONNECT); // once per request
         // After the popup's own onResume / fragment commit, like a tap on its button.
         MAIN.post(() -> {
+            String step;
             try {
                 Object viewModel = call(activity, "getViewModel");
                 if (viewModel == null) throw new IllegalStateException("no popup view model");
+                // parseIntent drops device_info when Bluetooth is off or a permission is missing.
+                if (viewModel.getClass().getMethod("getPairDevice").invoke(viewModel) == null) {
+                    throw new IllegalStateException("popup took no pair info");
+                }
                 viewModel.getClass().getMethod("startConnect").invoke(viewModel);
                 Logx.i("official popup connect started");
+                step = "官方弹窗已调用 startConnect";
             } catch (Throwable error) {
                 Logx.w("official popup connect failed", error);
+                Throwable cause = error.getCause() != null ? error.getCause() : error;
+                step = "官方弹窗未能连接：" + cause;
             }
+            Context context = context();
+            if (context != null) CrossProcessState.appendLastConnect(context, step, CONNECT_TRACE_MS);
         });
+    }
+
+    /** How long after a connect request popup / official states still belong to its trace. */
+    static final long CONNECT_TRACE_MS = 40000L;
+
+    /** Marks a back-link popup Intent already handed to the controller (onResume repeats). */
+    private static final String BACKLINK_SEEN = "opods_backlink_seen";
+
+    /**
+     * An official back-link popup (bluetooth_device + device_model, no device_info): the ROM's
+     * own one for an ACL the AirPods brought up, or the module's status popup. The controller
+     * connects the pair through the popup when its audio stays down.
+     */
+    private static void completeBackLink(Intent intent) {
+        if (intent == null) return;
+        BluetoothDevice device;
+        try {
+            if (intent.getBooleanExtra(BACKLINK_SEEN, false)
+                    || intent.hasExtra(AirPodsController.EXTRA_LID_DEVICE)
+                    || intent.hasExtra("device_info")) return;
+            device = intent.getParcelableExtra("bluetooth_device", BluetoothDevice.class);
+        } catch (Throwable ignored) {
+            return;
+        }
+        if (device == null) return;
+        intent.putExtra(BACKLINK_SEEN, true);
+        Context context = context();
+        if (context != null) AirPodsController.get(context).onBackLinkPopup(device);
+    }
+
+    /** MyDevices application context of this process, once known. */
+    static Context context() {
+        return appContext != null ? appContext : currentApplication();
     }
 
     /** The pair the official popup was started for: its Intent first, then its view model. */
