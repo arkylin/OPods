@@ -95,7 +95,7 @@ ATT 使用 PSM 31，读 `0A`、写 `12`、通知 `1B`。
 
 `关于`页有完整图例和 LibrePods 功能对照，每个控件下方都有对应的协议/存储标注。
 
-## Hook 范围：三个进程，34 个 Hook 点
+## Hook 范围：三个进程，36 个 Hook 点
 
 `xposed/scope.list` 只声明三个包，所有增强逻辑都通过 LibXposed 的
 `module.hook(...).intercept(...)` 在官方进程内完成，不使用 `XposedBridge` 直接 Hook，
@@ -224,12 +224,11 @@ GitHub 链接只通过 `Intent.ACTION_VIEW` 交给系统浏览器；日志分享
 - ColorOS / OPlus，Android 13 及以上；主要在 ColorOS 17、Android 17 上验证。
 - LSPosed API 101 或兼容版本。
 - 已配对 AirPods；AirPods 5 已验证，AirPods Pro 3 待真机验证。
-- **COUI**（Apache-2.0）：Slider 的尺寸、关键点、按压动画和配色参数参考；使用 Android `SeekBar`/`Drawable` 独立重实现。
 - 构建需要 JDK 17+、Android SDK Platform、Build Tools 和仓库内附带的 LibXposed API JAR。
 
 ## 安装
 
-1. 从 Release 下载 `OPods-v3.4.49-arm64-v8a.apk` 后安装：`adb install -r OPods-v3.4.49-arm64-v8a.apk`。
+1. 从 Release 下载 `OPods-v3.4.52-arm64-v8a.apk` 后安装：`adb install -r OPods-v3.4.52-arm64-v8a.apk`。
 2. 3.4.49 继续使用 3.4.27 起的正式签名证书，可从 3.4.27 之后的版本直接覆盖安装；从更早的 debug 签名包升级仍需先卸载。
 3. 在 LSPosed 中启用模块，勾选三个作用域：`com.heytap.mydevices`、`com.heytap.accessory`、`com.android.bluetooth`。
 4. 停止 `com.heytap.mydevices` 和 `com.heytap.accessory`；通常不需要重启手机。若 Bluetooth 进程的 Off 过滤需要重新注入，再停止一次蓝牙进程。
@@ -302,15 +301,38 @@ GitHub Actions 在 `.github/workflows/build-apk.yml`，先跑上述单测，再�
 
 AACP 调试时先停止其他占用 PSM `0x1001` 的工具，例如 LibrePods；ATT 使用 PSM 31。
 
-## 代码来源与许可
+## 参考与使用的仓库
 
-本项目按 GNU GPL v3.0 或更高版本发布，见 `LICENSE`。详细第三方说明见 `THIRD_PARTY.md`。
+本项目按 GNU GPL v3.0 或更高版本发布，见 `LICENSE`；许可边界与第三方声明见 `THIRD_PARTY.md`。
+本项目仓库：[arkylin/OPods](https://github.com/arkylin/OPods)。
 
-- **LibrePods**（`v1.0.4`，GPL-3.0）：AACP 行为、能力表、ATT 通透/助听数据结构、开盖广播格式、IRK/ENC 处理、头部手势与对话感知行为、型号范围参考。
-- **HyperPods-X**（GPL-3.0）：HyperOS 原生弹窗、官方设置注入与 AACP 思路参考。
-- **airpods-off-fix**：ColorOS Off 帧、能力位、假断开行为参考；该提交未附明确许可文件，
-  本项目只记录公开协议事实，代码由本项目独立实现。
-- **LibXposed API**（Apache-2.0）：编译期 LSPosed API；运行时由 LSPosed 提供。
+### 协议与功能参考
+
+| 仓库 | 核对版本 | 许可 | 参考了什么 / 用在哪里 |
+| --- | --- | --- | --- |
+| [LibrePods](https://github.com/librepods-org/librepods) | `v1.0.4`（`89356c08cea3db0b6b54792d9329d09a87cc85fa`） | GPL-3.0 | AACP 控制通道（握手、控制项、电量 `0x04`、佩戴 `0x06`、设备信息、EQ、头部追踪、对话感知）、识别密钥请求与 `0x31` 解析、ATT 通透/助听数据结构、Apple 邻近消息字段（盒盖位、电量、佩戴、连接状态）、RPA 校验与 ENC 解密、型号能力表、功能范围与面板里的“LibrePods 功能对照”。OPods 的 Java 协议层是对其行为的独立移植。 |
+| [HyperPods-X](https://github.com/YeFeng233/HyperPods-X) | `v0.5.1`（`5ea160cd9ea0ce9cd2de5f3b771b38f9a71977ad`） | GPL-3.0-or-later | HyperOS 上“官方弹窗 + 官方设置页注入”的整体思路与 AACP 实现参考；开盖判定（盒盖位、同一次开盖只响应一次）；硬件卸载的厂商数据过滤要覆盖整条 27 字节消息才会命中。ColorOS/OPPO 路径由本项目重新实现。 |
+| [airpods-off-fix](https://github.com/Chloeyayo/airpods-off-fix) | `d4914cecbe21b65bce78a57babcd01197fc54999` | 未附许可证 | ColorOS 连接 AirPods 时下发的 `DISABLE_OFF` 帧、Off 能力位 `0x200`、假断开现象（`AapOffFilter`、`DisconnectFilter`、能力位 Hook）。只使用公开协议事实，代码独立实现，未复制其源码或二进制。 |
+| [COUI](https://github.com/suqi8/coui) | — | Apache-2.0 | Slider 轨道高度、滑块半径、关键点、按压放大与配色参数（`SliderTickDrawable`、`CouiSliderThumbDrawable`），用 Android `SeekBar`/`Drawable` 独立重实现，不引入上游源码或 Compose 运行时。 |
+
+### 编译与运行依赖
+
+| 仓库 | 版本 | 用在哪里 |
+| --- | --- | --- |
+| [LibXposed API](https://github.com/libxposed/api) | API 101 | `libs/libxposed-api.jar`，编译期 API（`module.prop`：`minApiVersion=101`、`targetApiVersion=101`）；Apache-2.0，运行时由 LSPosed 提供，不打进 APK。 |
+| [LSPosed](https://github.com/LSPosed/LSPosed) | 测试机 LSPosed 管理器 `2.1.1` | 运行时 Hook 框架；需要支持 LibXposed API 101 的版本。启用模块、勾选作用域都在 LSPosed 里由用户完成。 |
+| [KernelSU](https://github.com/tiann/KernelSU) | — | 测试机的 root 方案（LSPosed 的运行前提）；调试时用它的 `resetprop` 设 ColorOS 隐藏属性、核对进程注入。模块本身不申请 root。 |
+
+### 逆向与构建发布工具
+
+| 仓库 | 版本 | 用在哪里 |
+| --- | --- | --- |
+| [jadx](https://github.com/skylot/jadx) | `1.5.3` | 反编译 ColorOS 系统应用找 Hook 点：`com.heytap.mydevices` 17.25.10、`com.heytap.accessory`（AccessoryFramework）17.6.16、蓝牙与设置相关 APK。反编译产物只在本地分析，不进仓库。 |
+| [actions/checkout](https://github.com/actions/checkout) | `v7.0.1` | CI 检出源码 |
+| [actions/setup-java](https://github.com/actions/setup-java) | `v6.1.0` | CI 安装 Temurin JDK 21 |
+| [android-actions/setup-android](https://github.com/android-actions/setup-android) | `v4.0.4` | CI 安装 Android SDK、Platform 37.2 与 Build Tools 37.0.0 |
+| [actions/upload-artifact](https://github.com/actions/upload-artifact) | `v7.0.2` | 上传构建出的 APK 与 `.sha256` |
+| [GitHub CLI](https://github.com/cli/cli) | Runner 自带 | `gh release create` 发布 tag 对应的 Release |
 
 ColorOS、OPlus、MyDevices、Apple 和 AirPods 的系统类、商标和产品归各自权利人所有；
 本项目不包含其专有源码或资源，所有官方类均通过运行时反射/Hook 使用。
