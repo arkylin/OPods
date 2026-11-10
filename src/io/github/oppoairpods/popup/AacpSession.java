@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothSocket;
 import android.content.Context;
 import android.os.ParcelUuid;
+import android.os.SystemClock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -39,7 +40,11 @@ final class AacpSession {
     private static final long WARMUP_RETRY_DELAY_MS = 1200L;
     private static final long INIT_RETRY_1_MS = 1080L;
     private static final long INIT_RETRY_2_MS = 5960L;
+    /** A control written before the pair acknowledged anything may be the last one it obeys. */
+    private static final long INIT_GRACE_MS = 3000L;
     private static final long SILENCE_TIMEOUT_MS = 7000L;
+    /** A silent link is re-handshaked once before it is dropped; see startSilenceWatchdog. */
+    private static final long SILENCE_RECYCLE_MS = 14000L;
 
     private final Context context;
     private final String address;
@@ -56,6 +61,10 @@ final class AacpSession {
     private volatile BluetoothSocket socket;
     private volatile Thread thread;
     private volatile long lastReceiveAt;
+    /** The initial handshake went out on the current socket: controls may be written. */
+    private volatile boolean handshakeSent;
+    /** elapsedRealtime() when that handshake finished; bounds the blind-write grace period. */
+    private volatile long initSentAt;
     private volatile boolean allowRetries;
     private volatile boolean requestProximityKeys;
 
@@ -96,6 +105,21 @@ final class AacpSession {
 
     boolean ready() {
         return running.get() && socket != null && lastReceiveAt > 0L;
+    }
+
+    /**
+     * The channel can take a control packet right now. Weaker than {@link #ready()} only by a
+     * bounded grace period: normally the packet waits for the pair's first report (the handshake
+     * acknowledgement), and only when that report never comes within INIT_GRACE_MS do we write
+     * blind. Writing straight after the handshake without the ack is what made the first noise
+     * switch work and every later one die.
+     */
+    boolean canWrite() {
+        BluetoothSocket channel = socket;
+        if (!running.get() || channel == null || !channel.isConnected() || !handshakeSent) {
+            return false;
+        }
+        return lastReceiveAt > 0L || SystemClock.elapsedRealtime() - initSentAt >= INIT_GRACE_MS;
     }
 
     boolean hadData() {
@@ -219,6 +243,8 @@ final class AacpSession {
 
     private void openAndRead() throws Exception {
         lastReceiveAt = 0L;
+        handshakeSent = false;
+        initSentAt = 0L;
         BluetoothManager manager = (BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter = manager == null ? null : manager.getAdapter();
         if (adapter == null || !adapter.isEnabled()) throw new IOException("Bluetooth unavailable");
@@ -299,6 +325,8 @@ final class AacpSession {
             output.flush();
             Thread.sleep(180L);
             output.write(AacpProtocol.notifications());
+            initSentAt = SystemClock.elapsedRealtime();
+            handshakeSent = true;
             output.flush();
             if (requestProximityKeys) {
                 // Lid-open identity check needs the IRK; the ENC key decrypts advert battery.
@@ -319,8 +347,20 @@ final class AacpSession {
         Thread watchdog = new Thread(() -> {
             try {
                 Thread.sleep(SILENCE_TIMEOUT_MS);
+                if (!running.get() || socket != channel || lastReceiveAt > 0L) return;
+                // Keep the L2CAP link instead of throwing it away: a first connect often opens the
+                // socket and stays quiet for a few seconds, and every rebuild costs another connect
+                // plus a fresh handshake (~7 s each). Two rebuilds are exactly the "noise control
+                // does nothing for the first ~15 s after connecting" window.
+                Logx.w("AACP channel #" + sessionId + " silent; re-sending handshake", null);
+                try {
+                    writer.execute(() -> sendInitialization(channel, "silence-retry"));
+                } catch (Throwable ignored) {
+                    return;
+                }
+                Thread.sleep(SILENCE_RECYCLE_MS - SILENCE_TIMEOUT_MS);
                 if (running.get() && socket == channel && lastReceiveAt == 0L) {
-                    Logx.w("AACP channel #" + sessionId + " silent; recycling", null);
+                    Logx.w("AACP channel #" + sessionId + " still silent; recycling", null);
                     closeSocket();
                 }
             } catch (InterruptedException interrupted) {

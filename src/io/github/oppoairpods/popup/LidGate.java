@@ -35,11 +35,19 @@ final class LidGate {
     static final long SESSION_GAP_MS = 8000L;
     /** Several cases opened at once (a meeting room) still cost at most one wake per 2 s. */
     static final long MIN_WAKE_INTERVAL_MS = 2000L;
+    /**
+     * One opening may wake twice: the first wake can be dropped downstream (settings page open,
+     * popup de-dupe, background-activity limit) and a lid left open would otherwise lose the
+     * whole opening until it is closed and reopened.
+     */
+    private static final int MAX_WAKES_PER_OPENING = 2;
+    private static final long REWAKE_DELAY_MS = 3500L;
     private static final int MAX_SESSIONS = 32;
 
     private static final class Session {
         long lastSeen;
-        boolean woken;
+        int wakes;
+        long lastWakeAt;
     }
 
     private final Map<String, Session> sessions = new LinkedHashMap<String, Session>(16, 0.75f, true) {
@@ -89,10 +97,12 @@ final class LidGate {
             sessions.put(address, session);
         }
         session.lastSeen = now;
-        if (session.woken || rssi < MIN_RSSI || now - lastWakeAt < MIN_WAKE_INTERVAL_MS) {
-            return Verdict.IGNORE;
-        }
-        session.woken = true;
+        session.lastSeen = now;
+        if (rssi < MIN_RSSI || now - lastWakeAt < MIN_WAKE_INTERVAL_MS) return Verdict.IGNORE;
+        if (session.wakes >= MAX_WAKES_PER_OPENING) return Verdict.IGNORE;
+        if (session.wakes > 0 && now - session.lastWakeAt < REWAKE_DELAY_MS) return Verdict.IGNORE;
+        session.wakes++;
+        session.lastWakeAt = now;
         lastWakeAt = now;
         return Verdict.WAKE;
     }

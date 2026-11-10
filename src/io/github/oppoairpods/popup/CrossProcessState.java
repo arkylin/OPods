@@ -28,7 +28,11 @@ final class CrossProcessState {
     private static final String BATTERY = "battery";
     private static final String BATTERY_ADDRESS = "battery_address";
     private static final String BATTERY_AT = "battery_at";
-    private static final long SETTINGS_VISIBLE_MS = 10L * 60L * 1000L;
+    /**
+     * Settings page flag is only valid while that page is really alive; a page killed without
+     * onStop used to keep the lid popup blocked for ten minutes.
+     */
+    private static final long SETTINGS_VISIBLE_MS = 90L * 1000L;
     private static final long BATTERY_VISIBLE_MS = 12L * 60L * 60L * 1000L;
     private static final Object LOCK = new Object();
 

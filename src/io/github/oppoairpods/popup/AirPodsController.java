@@ -55,6 +55,8 @@ final class AirPodsController implements AacpSession.Listener {
     private final Map<Integer, int[]> controls = Collections.synchronizedMap(new HashMap<>());
     private final Object sessionLock = new Object();
     private final ArrayDeque<int[]> pendingControls = new ArrayDeque<>();
+    /** Bounded requeue budget for flushPending: a failed write must not spin on the main thread. */
+    private int pendingRetryBudget;
     private volatile int[] pendingEqualizer;
 
     private static final int[] RESTORABLE_CONTROLS = {
@@ -98,11 +100,19 @@ final class AirPodsController implements AacpSession.Listener {
     private volatile int wearSecondary = -1;
     private volatile long lastPopupAt;
     private volatile long lastCaseAt;
+    /** Last lid advert that got as far as parsing, matched or not: the ACL fallback uses it. */
+    private volatile long lastAdvertAt;
     private volatile long lastConnectAt;
     // A listening mode the user just picked, kept on screen until the AirPods confirm it.
     private static final long MODE_CONFIRM_MS = 3000L;
     private static final long MODE_QUEUE_MS = 15000L;
     private final ListeningModeTracker modeTracker = new ListeningModeTracker(MODE_CONFIRM_MS);
+    // Self-healing: what the user last asked for. If the pair answers with another mode, the
+    // choice is re-sent a couple of times instead of silently reverting. "switches once, then
+    // the selector does nothing" is exactly the case where one of those writes got lost.
+    private int requestedMode;
+    private long requestedAt;
+    private int requestedReplays;
     private final CallGestureMonitor callGestures;
     private final ConversationVolume conversationVolume;
     private volatile boolean callGestureActive;
@@ -697,6 +707,9 @@ final class AirPodsController implements AacpSession.Listener {
         modeTracker.select(mode);
         setControlState(AacpProtocol.CONTROL_LISTENING_MODE, mode);
         sendControl(AacpProtocol.CONTROL_LISTENING_MODE, mode);
+        requestedMode = mode;
+        requestedAt = System.currentTimeMillis();
+        requestedReplays = 0;
         // Never keep a choice that could not even be sent pinned on screen forever.
         main.postDelayed(() -> modeTracker.dropIfUnsent(mode), MODE_QUEUE_MS);
     }
@@ -731,6 +744,20 @@ final class AirPodsController implements AacpSession.Listener {
         controlsRevision++;
         Logx.i("listening mode not confirmed; AirPods stay on " + kept);
         notifyChanged();
+        replayRequestedMode(kept);
+    }
+
+    /** Re-sends the user's fresh choice when the pair kept something else. Bounded, not a loop. */
+    private void replayRequestedMode(int kept) {
+        if (requestedMode == 0 || kept == requestedMode) return;
+        if (requestedReplays >= 2) return;
+        if (System.currentTimeMillis() - requestedAt > 60_000L) return;
+        requestedReplays++;
+        Logx.i("listening mode " + requestedMode + " not applied (pair stays " + kept
+                + "); resending " + requestedReplays + "/2");
+        modeTracker.select(requestedMode);
+        sendControl(AacpProtocol.CONTROL_LISTENING_MODE, requestedMode);
+        main.postDelayed(() -> modeTracker.dropIfUnsent(requestedMode), MODE_QUEUE_MS);
     }
 
     private void resetListeningModeTracking() {
@@ -944,7 +971,12 @@ final class AirPodsController implements AacpSession.Listener {
     // Single source of truth for AACP link retries: only while an official AirPods surface is
     // visible. Without one, a broken link stops the session until the next popup or page.
     private boolean wantsAacpRetries() {
-        return settingsPageOpen || panelOpen || popupVisible;
+        if (settingsPageOpen || panelOpen || popupVisible) return true;
+        // A tapped control that is still waiting in the queue deserves a rebuilt channel: without
+        // this, a link that died while no official surface was up silently swallowed the tap.
+        synchronized (pendingControls) {
+            return !pendingControls.isEmpty();
+        }
     }
 
     private void syncAacpRetries() {
@@ -966,6 +998,18 @@ final class AirPodsController implements AacpSession.Listener {
         boolean hadAddress = !address.isEmpty() && address.equalsIgnoreCase(device.getAddress());
         attachDevice(device);
         Logx.i("AirPods link connected; controller address refreshed");
+        long now = System.currentTimeMillis();
+        // Second chance for a lid opening whose popup never made it: the pair brought its ACL up
+        // on its own and an official popup is not on screen yet. When a popup is already visible
+        // it is the official back-link popup and onBackLinkPopup() owns the connect 0.8 s later;
+        // fighting it from here only produced "弹窗在、但一直不连".
+        boolean recentLid = lastAdvertAt > 0L && now - lastAdvertAt <= 10000L;
+        if (recentLid && !popupVisible && wantsOfficialConnect(device, CONNECT_IF_DOWN)) {
+            lastAdvertAt = 0L;
+            Logx.i("lid advert without a popup; using the ACL to run the official connect");
+            launchOfficialPopup(device, CONNECT_IF_DOWN);
+            return;
+        }
         scheduleOfficialPopup(device, hadAddress ? 250L : 0L);
     }
 
@@ -1024,6 +1068,7 @@ final class AirPodsController implements AacpSession.Listener {
      */
     void onCaseAdvertisement(String bleAddress, AppleAdvertisement.LidInfo advert) {
         if (advert == null || !advert.lidOpen) return;
+        lastAdvertAt = System.currentTimeMillis();
         if (!autoConnect()) {
             Logx.i("case-open ignored because auto-connect is disabled");
             return;
@@ -1166,22 +1211,38 @@ final class AirPodsController implements AacpSession.Listener {
     private static final long CONNECT_REPEAT_MS = 3500L;
 
     private void launchOfficialPopup(BluetoothDevice device, int mode) {
-        if (settingsPageOpen || CrossProcessState.settingsOpen(context)) return;
+        if (settingsPageOpen || CrossProcessState.settingsOpen(context)) {
+            noteLidBlocked(mode, "开盖被拦：设置页打开");
+            return;
+        }
         boolean connect = wantsOfficialConnect(device, mode);
         long now = System.currentTimeMillis();
         if (connect) {
             // A status popup already on screen must not swallow a connect: on a lid opening the
             // AirPods often bring their ACL up before the lid advert gets here, and that link's
             // popup used to win. The singleInstance popup takes this one through onNewIntent.
-            if (now - lastConnectAt < CONNECT_REPEAT_MS) return;
+            if (now - lastConnectAt < CONNECT_REPEAT_MS) {
+                noteLidBlocked(mode, "开盖被拦：连接请求去重");
+                return;
+            }
             lastConnectAt = now;
         } else {
             // Already showing this pair (opened on the lid, then the link came up): keep it.
             if (popupVisible && device != null && device.getAddress().equalsIgnoreCase(address)) return;
-            if (now - lastPopupAt < 3500L) return;
+            if (now - lastPopupAt < 3500L) {
+                noteLidBlocked(mode, "开盖被拦：状态弹窗去重");
+                return;
+            }
         }
         lastPopupAt = now;
         startOfficialPopup(device, connect, mode == CONNECT_IF_DOWN ? "开盖" : null);
+    }
+
+    /** Lid path used to drop these silently; the panel's "最近开盖连接" now names the reason. */
+    private void noteLidBlocked(int mode, String reason) {
+        if (mode != CONNECT_IF_DOWN) return;
+        CrossProcessState.setLastConnect(context, reason);
+        Logx.i(reason);
     }
 
     /**
@@ -1548,11 +1609,11 @@ final class AirPodsController implements AacpSession.Listener {
     boolean sendControl(int id, int... values) {
         if (isRestorableControl(id)) persistControl(id, values);
         AacpSession current = session;
-        boolean sent = current != null && current.ready() && current.sendControl(id, values);
+        boolean sent = current != null && current.canWrite() && current.sendControl(id, values);
         if (!sent) {
             ensureSession();
             current = session;
-            sent = current != null && current.ready() && current.sendControl(id, values);
+            sent = current != null && current.canWrite() && current.sendControl(id, values);
         }
         if (sent) {
             Logx.i("AACP control -> id=0x" + Integer.toHexString(id) + " values="
@@ -1565,6 +1626,12 @@ final class AirPodsController implements AacpSession.Listener {
             return false;
         }
         synchronized (pendingControls) {
+            // One entry per control id: tapping noise on/off during the handshake must not leave a
+            // backlog that the earbuds replay in a burst once the channel is up.
+            java.util.Iterator<int[]> existing = pendingControls.iterator();
+            while (existing.hasNext()) {
+                if (existing.next()[0] == id) existing.remove();
+            }
             if (pendingControls.size() >= 32) pendingControls.removeFirst();
             pendingControls.addLast(valuesWithId(id, values));
         }
@@ -1707,13 +1774,31 @@ final class AirPodsController implements AacpSession.Listener {
 
     private void flushPending() {
         AacpSession current = session;
-        if (current == null || !current.ready()) return;
+        // canWrite(), not ready(): the queue may drain as soon as the handshake is out, long before
+        // the earbuds send their first report.
+        if (current == null || !current.canWrite()) return;
+        boolean retry = false;
         synchronized (pendingControls) {
             int[] next;
             while ((next = pendingControls.pollFirst()) != null) {
                 int[] values = Arrays.copyOfRange(next, 1, next.length);
-                if (current.sendControl(next[0], values)) noteListeningModeSent(next[0], values);
+                if (current.sendControl(next[0], values)) {
+                    noteListeningModeSent(next[0], values);
+                } else {
+                    // Put it back instead of dropping it: the socket can be swapped under us.
+                    pendingControls.addFirst(next);
+                    retry = true;
+                    break;
+                }
             }
+        }
+        if (retry) {
+            if (pendingRetryBudget < 6) {
+                pendingRetryBudget++;
+                main.postDelayed(this::flushPending, 500L);
+            }
+        } else {
+            pendingRetryBudget = 0;
         }
         String rename = pendingRename;
         if (rename != null) {
