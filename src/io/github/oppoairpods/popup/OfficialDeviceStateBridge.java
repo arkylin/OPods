@@ -58,6 +58,7 @@ final class OfficialDeviceStateBridge {
 
     static void clear(AirPodsController controller) {
         if (controller == null || APPLYING.get()) return;
+        OfficialBatteryOverride.clear();
         schedule(controller, true, CLEAR_SCHEDULED);
     }
 
@@ -83,6 +84,7 @@ final class OfficialDeviceStateBridge {
         for (int index = 3; index < 6; index++) {
             if (battery[index] < -1 || battery[index] > 8) return;
         }
+        OfficialBatteryOverride.set(address, battery);
         Logx.i("core IPC battery <- " + Arrays.toString(battery));
         applyExternal(appContext, address, battery);
     }

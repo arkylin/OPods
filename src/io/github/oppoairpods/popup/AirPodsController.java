@@ -1053,6 +1053,7 @@ final class AirPodsController implements AacpSession.Listener {
         conversationVolume.stopSpeaking();
         resetListeningModeTracking();
         controlsRevision++;
+        OfficialBatteryOverride.clear();
         OfficialBatteryBridge.clear();
         OfficialDeviceStateBridge.clear(this);
     }
@@ -1147,7 +1148,9 @@ final class AirPodsController implements AacpSession.Listener {
             recomputeChargingMask();
         }
         Logx.i("lid advert battery -> official popup " + info.batteryText());
+        OfficialBatteryOverride.set(address, officialBatteryArray());
         OfficialBatteryBridge.schedule(this);
+        publishBatterySnapshot();
         notifyChanged();
     }
 
@@ -1899,7 +1902,9 @@ final class AirPodsController implements AacpSession.Listener {
 
     private void publishBatterySnapshot() {
         if (!aacpOwner || address == null || address.isEmpty() || !hasBatterySnapshot()) return;
-        OfficialCoreBridge.publish(context, address, officialBatteryArray());
+        int[] snapshot = officialBatteryArray();
+        OfficialBatteryOverride.set(address, snapshot);
+        OfficialCoreBridge.publish(context, address, snapshot);
     }
 
     @Override

@@ -53,6 +53,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicBoolean ADJUST_ERROR_LOGGED =
             new java.util.concurrent.atomic.AtomicBoolean();
+    private static final java.util.concurrent.atomic.AtomicBoolean BATTERY_LIST_ERROR_LOGGED =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -82,6 +84,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             myDevicesHooksInstalled = true;
         }
         HiddenApi.exemptBluetooth();
+        OfficialBatteryOverride.setLoader(loader);
         appContext = currentApplication();
         hookApplication(loader);
         hookPtcRegistration(loader);
@@ -99,8 +102,62 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         hookAdaptiveSlider(loader);
         hookDetailPanel(loader);
         hookOfficialBatteryUi(loader);
+        hookOfficialBatteryList(loader);
+        hookControlCenterBattery(loader);
         DisconnectFilter.install(this, loader);
         Logx.i("MyDevices hooks installed");
+    }
+
+    private void hookOfficialBatteryList(ClassLoader loader) {
+        try {
+            Class<?> info = Class.forName(
+                    "com.oplus.mydevices.domain.entities.device.DeviceInfo", false, loader);
+            Method getter = info.getDeclaredMethod("getBatteryList");
+            hook(getter).intercept(chain -> {
+                if (OfficialBatteryOverride.hasSnapshot()) {
+                    try {
+                        Object device = chain.getThisObject();
+                        Object mac = info.getMethod("getMacAddress").invoke(device);
+                        Object type = info.getMethod("getDeviceType").invoke(device);
+                        if (mac instanceof String && type != null
+                                && OfficialBatteryOverride.matches((String) mac, type.toString())) {
+                            java.util.List<Object> list = OfficialBatteryOverride.batteryList();
+                            if (list != null && !list.isEmpty()) return list;
+                        }
+                    } catch (Throwable error) {
+                        if (!BATTERY_LIST_ERROR_LOGGED.getAndSet(true)) {
+                            Logx.w("official DeviceInfo battery list read failed", error);
+                        }
+                    }
+                }
+                return chain.proceed();
+            });
+            Logx.i("official DeviceInfo battery list hook installed");
+        } catch (Throwable error) {
+            Logx.w("official DeviceInfo battery list hook failed", error);
+        }
+    }
+
+    private void hookControlCenterBattery(ClassLoader loader) {
+        try {
+            Class<?> manager = Class.forName(
+                    "com.heytap.mydevices.core.controlcenter.ControlCenterManager", false, loader);
+            for (Method method : manager.getDeclaredMethods()) {
+                if (!method.getName().equals("pullDeviceSpaceInfo")
+                        || method.getParameterCount() != 1
+                        || method.getParameterTypes()[0] != Bundle.class) {
+                    continue;
+                }
+                hook(method).intercept(chain -> {
+                    Context context = appContext != null ? appContext : currentApplication();
+                    OfficialBatteryOverride.refresh(context);
+                    return chain.proceed();
+                });
+                Logx.i("control center battery refresh hook installed");
+            }
+        } catch (Throwable error) {
+            Logx.w("control center battery refresh hook failed", error);
+        }
     }
 
     private void installAapOff(ClassLoader loader) {

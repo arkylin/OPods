@@ -74,11 +74,17 @@ public final class LidGateTest {
     private static void oneWakePerOpening() {
         LidGate gate = new LidGate();
         check(gate.offer(OWN, -55, lidOpen(), 1_000) == LidGate.Verdict.WAKE, "first message of an opening wakes");
+        check(gate.offer(OWN, -55, lidOpen(), 1_200) == LidGate.Verdict.IGNORE,
+                "repeat inside the 0.8 s wake interval ignored");
+        check(gate.offer(OWN, -55, lidOpen(), 2_000) == LidGate.Verdict.IGNORE,
+                "second wake waits 1.5 s after the first");
+        check(gate.offer(OWN, -55, lidOpen(), 2_600) == LidGate.Verdict.WAKE,
+                "one opening may wake twice");
         // Repeats several times a second, and across LOW_POWER scan windows, while the lid stays open.
-        for (long t = 1_200; t < 60_000; t += 4_000) {
+        for (long t = 3_000; t < 60_000; t += 4_000) {
             check(gate.offer(OWN, -55, lidOpen(), t) == LidGate.Verdict.IGNORE, "repeat at " + t + " ignored");
         }
-        long closedAt = 57_200 + LidGate.SESSION_GAP_MS;
+        long closedAt = 60_000 + LidGate.SESSION_GAP_MS;
         check(gate.offer(OWN, -55, lidOpen(), closedAt) == LidGate.Verdict.WAKE, "reopening after a gap wakes again");
     }
 
