@@ -1010,6 +1010,22 @@ final class AirPodsController implements AacpSession.Listener {
             launchOfficialPopup(device, CONNECT_IF_DOWN);
             return;
         }
+        if (wantsOfficialConnect(device, CONNECT_IF_DOWN)) {
+            // ACL up, audio still down: a lid opening. The ROM's status popup reads the ACL as
+            // "已连接" while A2DP is not up yet (23:03:05.685 popup, 23:03:06.082 A2DP), so the
+            // pair looks connected without sound. Use the popup's connect mode instead: it shows
+            // connecting and drives the official connect.
+            Logx.i("ACL up without audio; opening the connect popup instead of the status one");
+            long delay = hadAddress ? 250L : 0L;
+            main.postDelayed(() -> {
+                try {
+                    launchOfficialPopup(device, CONNECT_IF_DOWN);
+                } catch (Throwable error) {
+                    Logx.w("audio-less ACL popup failed", error);
+                }
+            }, delay);
+            return;
+        }
         scheduleOfficialPopup(device, hadAddress ? 250L : 0L);
     }
 
@@ -1140,6 +1156,7 @@ final class AirPodsController implements AacpSession.Listener {
         if (bonded.isEmpty()) return new LidMatch(null, null, "没有已配对的 AirPods");
         java.util.Map<String, CrossProcessState.Keys> stored = CrossProcessState.allProximityKeys(context);
         java.util.List<BluetoothDevice> withoutIrk = new java.util.ArrayList<>();
+        boolean irkMismatch = false;
         for (BluetoothDevice device : bonded) {
             CrossProcessState.Keys keys = stored.get(device.getAddress().toUpperCase(Locale.ROOT));
             // The stack reports the identity address when it can resolve the RPA itself.
@@ -1150,10 +1167,21 @@ final class AirPodsController implements AacpSession.Listener {
                 withoutIrk.add(device);
             } else if (bleAddress != null && ProximityCrypto.verifyRpa(bleAddress, keys.irk)) {
                 return new LidMatch(device, keys, "已验证（IRK）", true);
+            } else {
+                // Keys are on file but do not resolve this advertisement (stale pair record, or an
+                // address that is not an RPA). Keeping the device out of the candidates made the
+                // fast lid-open path dead for this pair; treat it as unverified instead.
+                withoutIrk.add(device);
+                irkMismatch = true;
             }
         }
         if (withoutIrk.isEmpty()) return new LidMatch(null, null, "不是本机的 AirPods（IRK 不匹配）");
-        if (!lidOpenFallback()) return new LidMatch(null, null, "未获取识别密钥，且未允许未验证开盖");
+        Logx.i("lid advert " + bleAddress + ": " + (irkMismatch ? "IRK 校验失败" : "未获取识别密钥")
+                + "，未验证开盖 " + (lidOpenFallback() ? "已允许" : "未允许"));
+        if (!lidOpenFallback()) {
+            return new LidMatch(null, null, irkMismatch ? "识别密钥校验失败，且未允许未验证开盖"
+                    : "未获取识别密钥，且未允许未验证开盖");
+        }
         BluetoothDevice choice = withoutIrk.get(0);
         for (BluetoothDevice device : withoutIrk) {
             if (isDeviceConnected(device) || device.getAddress().equalsIgnoreCase(address)) {
@@ -1161,7 +1189,7 @@ final class AirPodsController implements AacpSession.Listener {
                 break;
             }
         }
-        return new LidMatch(choice, null, "未验证（这副耳机还没有识别密钥）");
+        return new LidMatch(choice, null, irkMismatch ? "未验证（IRK 校验失败）" : "未验证（这副耳机还没有识别密钥）");
     }
 
     private java.util.List<BluetoothDevice> bondedAirPods() {
@@ -1757,11 +1785,17 @@ final class AirPodsController implements AacpSession.Listener {
         if (current == null || !current.ready()) return;
         for (int id : RESTORABLE_CONTROLS) {
             int[] desired = savedControl(id);
-            if (desired == null || AacpProtocol.sameControlValues(controls.get(id), desired)) continue;
+            if (desired == null) continue;
+            int[] reported = controls.get(id);
+            // The pair reports every control it owns right after init. A saved value is only worth
+            // pushing when the pair actually said something different; writing blind from prefs is
+            // what turned a switch the user had just turned off back on (0x0a and 0x26 on 11-13),
+            // because the saved copy is from an older session.
+            if (reported == null || AacpProtocol.sameControlValues(reported, desired)) continue;
             setControlState(id, desired);
             current.sendControl(id, desired);
             Logx.i("AACP restored user control id=0x" + Integer.toHexString(id)
-                    + " values=" + Arrays.toString(desired));
+                    + " from " + Arrays.toString(reported) + " to " + Arrays.toString(desired));
         }
         int[] equalizer = savedEqualizer();
         int[] activeEqualizer = controls.get(AacpProtocol.OP_EQUALIZER);

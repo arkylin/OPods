@@ -47,6 +47,7 @@ final class LidRelay {
     private static final LidGate GATE = new LidGate();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final AtomicLong WAKES = new AtomicLong();
+    private static final AtomicLong RESULTS = new AtomicLong();
     private static final AtomicBoolean FILTER_LOGGED = new AtomicBoolean();
     private static final AtomicBoolean LEGACY_LOGGED = new AtomicBoolean();
     private static volatile ScanFilter lidFilter;
@@ -114,6 +115,43 @@ final class LidRelay {
      * ROM has no use for them (its AirPods code ignores paired pairs on lid-open), so its
      * FusionWakeup is not run for each repeat. Anything else goes on to the ROM untouched.
      */
+    /** Diagnostic: everything the ROM's persistent scan hands the AirPods result path. */
+    static void logResult(ScanResult result, Object matched) {
+        long index = RESULTS.incrementAndGet();
+        if (index > 200 || result == null) return;
+        ScanRecord record = result.getScanRecord();
+        byte[] data = record == null ? null : record.getManufacturerSpecificData(APPLE);
+        if (data == null) return;
+        String address = result.getDevice() == null ? "?" : result.getDevice().getAddress();
+        Logx.i("official scan result #" + index + " " + address + " rssi=" + result.getRssi()
+                + " apple=" + describe(data) + " matched=" + describeFilter(matched));
+    }
+
+    private static String describe(byte[] data) {
+        if (data == null) return "none";
+        StringBuilder text = new StringBuilder(data.length * 3);
+        int limit = Math.min(data.length, 12);
+        for (int i = 0; i < limit; i++) {
+            if (i > 0) text.append(' ');
+            int value = data[i] & 0xFF;
+            if (value < 0x10) text.append('0');
+            text.append(Integer.toHexString(value));
+        }
+        if (data.length > limit) text.append(" (" + data.length + ")");
+        return text.toString();
+    }
+
+    private static String describeFilter(Object matched) {
+        if (!(matched instanceof ScanFilter)) {
+            return matched == null ? "null" : matched.getClass().getSimpleName();
+        }
+        ScanFilter filter = (ScanFilter) matched;
+        if (filter.equals(lidFilter())) return "lid";
+        if (isLegacyBroadFilter(filter)) return "legacy";
+        byte[] data = filter.getManufacturerData();
+        return "id=" + filter.getManufacturerId() + " len=" + (data == null ? -1 : data.length);
+    }
+
     static boolean offer(Context context, ScanResult result, Object matched) {
         if (result == null) return false;
         if (matched instanceof ScanFilter) {

@@ -288,6 +288,10 @@ final class AacpProtocol {
             int type = u(packet, offset);
             int length = u(packet, offset + 2);
             offset += 4;
+            // Layout diagnosis only: which key type arrived and how many bytes it claims. Never
+            // the key bytes themselves.
+            Logx.i("proximity key " + i + "/" + count + ": type=0x" + Integer.toHexString(type)
+                    + " len=" + length + " body@" + offset + " packet=" + packet.length);
             if (offset + length > packet.length) break;
             byte[] key = Arrays.copyOfRange(packet, offset, offset + length);
             if (type == KEY_IRK) event.irk = key;
@@ -296,7 +300,6 @@ final class AacpProtocol {
         }
         return event.irk != null || event.encKey != null ? event : null;
     }
-
     private static Event parseBattery(byte[] packet) {
         if (packet.length < 7) return null;
         int count = u(packet, 6);

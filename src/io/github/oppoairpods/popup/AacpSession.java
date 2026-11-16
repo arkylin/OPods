@@ -37,6 +37,18 @@ final class AacpSession {
     // Bounded warm-up retries to capture the first battery snapshot on a live ACL. Not a
     // background watchdog (see loop()).
     private static final int WARMUP_RETRY_LIMIT = 3;
+    /**
+     * Link-down retry budget. A lid opening whose AACP opens in the same millisecond the ACL
+     * comes up loses the socket instantly ("ACL lost"), and the channel then stayed dead until
+     * A2DP brought the link up again, so battery and controls were unreadable for seconds. Retry
+     * while the ACL is up and this attempt carried no data; give up as soon as the ACL is gone.
+     */
+    private static final int LINK_RETRY_LIMIT = 4;
+    private static final long LINK_RETRY_FIRST_MS = 400L;
+    private static final long LINK_RETRY_MAX_MS = 4000L;
+    /** How long a session waits for the ACL before it gives up on this attempt. */
+    private static final long ACL_READY_TIMEOUT_MS = 3000L;
+    private static final long ACL_POLL_MS = 150L;
     private static final long WARMUP_RETRY_DELAY_MS = 1200L;
     private static final long INIT_RETRY_1_MS = 1080L;
     private static final long INIT_RETRY_2_MS = 5960L;
@@ -177,6 +189,7 @@ final class AacpSession {
     private void loop() {
         int failures = 0;
         int warmupRetries = 0;
+        int linkRetries = 0;
         try {
             while (running.get()) {
                 boolean linkDown = false;
@@ -189,6 +202,7 @@ final class AacpSession {
                     if (running.get()) Logx.w("AACP channel #" + sessionId + " closed", error);
                 }
                 boolean gotData = lastReceiveAt > 0L;
+                if (gotData) linkRetries = 0;   // a working channel earns a fresh budget
                 closeSocket();
                 if (!running.get()) break;
                 // Warm-up retry: the very first connect often opens the socket but goes silent
@@ -207,6 +221,26 @@ final class AacpSession {
                 boolean stopping = linkDown || !allowRetries;
                 if (stopping && !linkDown) {
                     Logx.i("AACP channel #" + sessionId + " background retry disabled; stopping");
+                }
+                if (linkDown && !gotData && linkRetries < LINK_RETRY_LIMIT) {
+                    // The socket died before it carried a single byte. AACP is opened in the same
+                    // millisecond the lid brings the ACL up, so aclUp() still reports false here
+                    // even though the link is about to exist, and allowRetries is still false
+                    // because no official surface is up yet. Wait once, then look again instead of
+                    // tearing the session down and leaving battery/controls unreadable until A2DP
+                    // reconnects. Bounded, and never runs once a channel has delivered data.
+                    linkRetries++;
+                    long delay = Math.min(LINK_RETRY_MAX_MS, LINK_RETRY_FIRST_MS << (linkRetries - 1));
+                    Logx.i("AACP channel #" + sessionId + " link retry " + linkRetries + "/"
+                            + LINK_RETRY_LIMIT + " in " + delay + "ms");
+                    if (!pause(delay)) break;
+                    if (!aclUp()) {
+                        Logx.i("AACP channel #" + sessionId + " ACL gone; giving up the retry");
+                        listener.onClosed(true);
+                        break;
+                    }
+                    Logx.i("AACP channel #" + sessionId + " ACL back; reopening");
+                    continue;
                 }
                 listener.onClosed(stopping);
                 if (stopping) break;
@@ -250,7 +284,16 @@ final class AacpSession {
         if (adapter == null || !adapter.isEnabled()) throw new IOException("Bluetooth unavailable");
         BluetoothDevice device = adapter.getRemoteDevice(address);
         if (!isConnected(device)) {
-            throw new LinkLostException("ACL disconnected");
+            // A lid opening starts this session in the same millisecond the earbuds page the
+            // phone: the ACL is still CONNECTING, so opening a socket now only yields an instant
+            // "ACL lost" and an unreadable battery. Wait for the link instead.
+            long deadline = SystemClock.elapsedRealtime() + ACL_READY_TIMEOUT_MS;
+            while (!isConnected(device) && SystemClock.elapsedRealtime() < deadline) {
+                if (!running.get()) throw new LinkLostException("session stopped while waiting");
+                if (!pause(ACL_POLL_MS)) throw new LinkLostException("wait interrupted");
+            }
+            if (!isConnected(device)) throw new LinkLostException("ACL disconnected");
+            Logx.i("AACP channel #" + sessionId + " waited for the ACL before opening");
         }
         BluetoothSocket channel = createSocket(adapter, device, AacpProtocol.PSM, AACP_PARCEL_UUID);
         socket = channel;

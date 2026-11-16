@@ -16,13 +16,33 @@ final class ProximityCrypto {
 
     /** True when {@code address} is a resolvable private address generated from {@code irk}. */
     static boolean verifyRpa(String address, byte[] irk) {
-        if (irk == null || irk.length != 16) return false;
+        if (irk == null || irk.length != 16) {
+            Logx.i("rpa " + address + ": no usable IRK (len=" + (irk == null ? -1 : irk.length) + ")");
+            return false;
+        }
         byte[] rpa = addressLsbFirst(address);
-        if (rpa == null) return false;
+        if (rpa == null) {
+            Logx.i("rpa " + address + ": address not parsable");
+            return false;
+        }
         // Resolvable private addresses carry 0b01 in the two most significant bits.
-        if (((rpa[5] & 0xFF) >> 6) != 0x01) return false;
+        int addressType = (rpa[5] & 0xFF) >> 6;
+        if (addressType != 0x01) {
+            Logx.i("rpa " + address + ": address type " + addressType
+                    + " is not a resolvable private address, IRK cannot match it");
+            return false;
+        }
         byte[] hash = ah(irk, new byte[]{rpa[3], rpa[4], rpa[5]});
-        return hash != null && hash[0] == rpa[0] && hash[1] == rpa[1] && hash[2] == rpa[2];
+        boolean ok = hash != null && hash[0] == rpa[0] && hash[1] == rpa[1] && hash[2] == rpa[2];
+        // Only the 3 hash bytes, never the key material.
+        Logx.i("rpa " + address + ": ah=" + hex3(hash) + " address-hash=" + hex3(rpa)
+                + " -> " + (ok ? "match" : "MISMATCH"));
+        return ok;
+    }
+
+    private static String hex3(byte[] value) {
+        if (value == null || value.length < 3) return "--";
+        return String.format(Locale.ROOT, "%02X%02X%02X", value[0], value[1], value[2]);
     }
 
     /** Random address hash function ah(k, r) from the Bluetooth Core Specification. */

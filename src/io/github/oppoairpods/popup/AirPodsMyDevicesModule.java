@@ -45,6 +45,12 @@ public final class AirPodsMyDevicesModule extends XposedModule {
     private static volatile Context appContext;
     private static final java.util.concurrent.atomic.AtomicInteger PTC_LOGS =
             new java.util.concurrent.atomic.AtomicInteger();
+    private static final java.util.concurrent.atomic.AtomicInteger PTC_EVENT_LOGS =
+            new java.util.concurrent.atomic.AtomicInteger();
+    /** Diagnostics on logcat: Logx drops writes from the install path, logcat never does. */
+    private static final String DIAG_TAG = "OPPOAirPodsDiag";
+    private static final java.util.concurrent.atomic.AtomicInteger FRAMEWORK_SCAN_CALLS =
+            new java.util.concurrent.atomic.AtomicInteger();
     private static final java.util.concurrent.atomic.AtomicBoolean ADJUST_ERROR_LOGGED =
             new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -256,7 +262,11 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             if (onServiceFound == null) throw new NoSuchMethodException("onServiceFound");
             hook(onServiceFound).intercept(chain -> {
                 try {
-                    handleServiceNode(chain.getArg(0));
+                    Object node = chain.getArg(0);
+                    if (PTC_EVENT_LOGS.getAndIncrement() < 40) {
+                        Logx.i("PTC listener node " + describeNode(node));
+                    }
+                    handleServiceNode(node);
                 } catch (Throwable error) {
                     Logx.w("PTC advertisement handling failed", error);
                 }
@@ -285,6 +295,9 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     Object event = chain.getArg(1);
                     if (event != null) {
                         String type = (String) event.getClass().getMethod("getType").invoke(event);
+                        if (PTC_EVENT_LOGS.getAndIncrement() < 40) {
+                            Logx.i("PTC event type=" + type + " from " + event.getClass().getSimpleName());
+                        }
                         if ("onServiceFound".equals(type)) {
                             Object args = event.getClass().getMethod("getArgs").invoke(event);
                             Class<?> params = Class.forName(
@@ -361,6 +374,7 @@ public final class AirPodsMyDevicesModule extends XposedModule {
                     if (scanResult instanceof ScanResult) {
                         // The persistent filter the ROM matched this result with (n0.f).
                         Object matched = findFieldValue(result, android.bluetooth.le.ScanFilter.class);
+                        LidRelay.logResult((ScanResult) scanResult, matched);
                         if (LidRelay.offer(accessoryContext(), (ScanResult) scanResult, matched)) return null;
                     }
                 } catch (Throwable error) {
@@ -371,6 +385,58 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             Logx.i("official Accessory PTC output hook installed");
         } catch (Throwable error) {
             Logx.w("Accessory PTC output hook failed", error);
+        }
+        // Everything above depends on the ROM's own delivery classes, which differ per build. The
+        // framework callback below is what every result in this process passes through, so the
+        // lid filter the ROM already runs reaches LidGate even when the ROM's internals change.
+        try {
+            Class<?> wrapper = Class.forName(
+                    "android.bluetooth.le.BluetoothLeScanner$BleScanCallbackWrapper", false, null);
+            int hooked = 0;
+            StringBuilder names = new StringBuilder();
+            for (Method method : wrapper.getDeclaredMethods()) {
+                names.append(method.getName()).append('/').append(method.getParameterCount()).append(' ');
+                boolean wanted = "onScanResult".equals(method.getName())
+                        && (method.getParameterCount() == 1 || method.getParameterCount() == 2);
+                if (!wanted) continue;
+                hook(method).intercept(chain -> {
+                    try {
+                        int call = FRAMEWORK_SCAN_CALLS.incrementAndGet();
+                        if (call <= 5) diag("framework scan callback alive #" + call);
+                        // onScanResult(ScanResult) on 16, onScanResult(int, ScanResult) before it.
+                        Object arg = null;
+                        for (int i = 0; i < chain.getArgs().size(); i++) {
+                            Object candidate = chain.getArg(i);
+                            if (candidate instanceof ScanResult) {
+                                arg = candidate;
+                                break;
+                            }
+                        }
+                        if (arg instanceof ScanResult) {
+                            ScanResult result = (ScanResult) arg;
+                            if (call <= 10) {
+                                android.bluetooth.le.ScanRecord record = result.getScanRecord();
+                                byte[] apple = record == null ? null
+                                        : record.getManufacturerSpecificData(0x004C);
+                                diag("scan result #" + call + " "
+                                        + (result.getDevice() == null ? "?" : result.getDevice().getAddress())
+                                        + " rssi=" + result.getRssi()
+                                        + " apple=" + (apple == null ? "none" : hexPrefix(apple)));
+                            }
+                            LidRelay.logResult(result, null);
+                            if (LidRelay.offer(accessoryContext(), result, null)) return null;
+                        }
+                    } catch (Throwable error) {
+                        Logx.w("Accessory framework scan handling failed", error);
+                    }
+                    return chain.proceed();
+                });
+                hooked++;
+            }
+            diag("framework scan hook installed (" + hooked + ") methods: " + names);
+            Logx.i("official framework scan hook installed (" + hooked + ")");
+        } catch (Throwable error) {
+            Logx.w("official framework scan hook failed", error);
         }
     }
 
@@ -1093,6 +1159,8 @@ public final class AirPodsMyDevicesModule extends XposedModule {
 
     private void handleServiceNode(Object node) throws Exception {
         if (node == null) return;
+        int seen = PTC_LOGS.getAndIncrement();
+        if (seen < 20) Logx.i("PTC node " + describeNode(node));
         Object info = node.getClass().getMethod("getServiceInfo").invoke(node);
         if (info == null) return;
         Object raw = info.getClass().getMethod("getServiceData").invoke(info);
@@ -1118,7 +1186,6 @@ public final class AirPodsMyDevicesModule extends XposedModule {
         if (context == null) return;
         AirPodsController.get(context).onCaseAdvertisement(bleAddress, lid);
     }
-
     /** BLE address the official scanner reported (an RPA unless the stack resolved it). */
     private static String terminalAddress(Object node) {
         try {
@@ -1139,6 +1206,49 @@ public final class AirPodsMyDevicesModule extends XposedModule {
             value.append(part);
         }
         return value.toString();
+    }
+
+    /** Logcat diagnostics: Logx drops writes from the install path before its context exists. */
+    static void diag(String message) {
+        try {
+            android.util.Log.i(DIAG_TAG, message);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Diagnostic dump of a PTC service node: what the ROM's scanner actually delivered. */
+    private static String describeNode(Object node) {
+        String address;
+        try {
+            address = String.valueOf(terminalAddress(node));
+        } catch (Throwable error) {
+            address = "?";
+        }
+        String info;
+        try {
+            Object serviceInfo = node.getClass().getMethod("getServiceInfo").invoke(node);
+            info = describeObject(serviceInfo);
+        } catch (Throwable error) {
+            info = "err:" + error.getClass().getSimpleName();
+        }
+        return "addr=" + address + " info=" + info;
+    }
+
+    private static String describeObject(Object object) {
+        if (object == null) return "null";
+        StringBuilder text = new StringBuilder(object.getClass().getSimpleName()).append('{');
+        for (java.lang.reflect.Method method : object.getClass().getMethods()) {
+            String name = method.getName();
+            if (method.getParameterCount() != 0 || "getClass".equals(name)) continue;
+            if (!name.startsWith("get") && !name.startsWith("has")) continue;
+            try {
+                Object value = method.invoke(object);
+                if (value instanceof byte[]) value = hexPrefix((byte[]) value);
+                text.append(name).append('=').append(value).append(' ');
+            } catch (Throwable ignored) {
+            }
+        }
+        return text.append('}').toString();
     }
 
     private void attachSettingsDevice(Object activity) throws Exception {
